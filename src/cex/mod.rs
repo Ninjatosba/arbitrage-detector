@@ -1,14 +1,62 @@
-//! CEX WebSocket client.
-//! 
-//! Responsibilities:
-//! • Maintain connection to a centralized exchange public feed.
-//! • Keep the latest best bid / ask for a trading pair.
-//! • Handle reconnection and backoff.
+//! CEX (Binance) WebSocket client.
+//!
+//! Connects to Binance partial depth stream (`@depth20@100ms`) and yields
+//! a snapshot of the top 20 levels (`BookDepth`) so we can compute VWAP for
+//! arbitrary trade sizes.
 
-use crate::models::PricePoint;
+use anyhow::{Context, Result};
+use futures::{Stream, StreamExt};
+use serde::Deserialize;
+use tokio_tungstenite::connect_async;
+use url::Url;
 
-/// Connect to the CEX WebSocket and stream `PricePoint` updates (stub).
-/// Returns nothing for now; we will change the return type once dependencies are in place.
-pub async fn connect_and_stream() -> Option<PricePoint> {
-    todo!("Implement WebSocket client");
+const BINANCE_WS_ENDPOINT: &str = "wss://stream.binance.com:9443/ws";
+
+#[derive(Debug, Deserialize)]
+struct DepthMsg {
+    #[serde(rename = "lastUpdateId")]
+    _last_update_id: u64,
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
+}
+
+/// Returns an asynchronous stream of `BookTop`s for the given Binance symbol, e.g. "ethusdt".
+use crate::models::BookDepth;
+
+pub async fn connect_and_stream(symbol: &str) -> Result<impl Stream<Item = BookDepth>> {
+    let stream_path = format!("{}@depth20@100ms", symbol.to_lowercase());
+    let url = Url::parse(&format!("{}/{}", BINANCE_WS_ENDPOINT, stream_path))?;
+
+    let (ws_stream, _resp) = connect_async(url)
+        .await
+        .context("WebSocket connect failed")?;
+
+    let mapped = ws_stream.filter_map(|msg_res| async {
+        match msg_res {
+            Ok(msg) if msg.is_text() => {
+                let txt = msg.into_text().ok()?;
+                let parsed: DepthMsg = serde_json::from_str(&txt).ok()?;
+                let bids: Vec<(f64, f64)> = parsed
+                    .bids
+                    .iter()
+                    .filter_map(|lvl| Some((lvl[0].parse().ok()?, lvl[1].parse().ok()?)))
+                    .collect();
+                let asks: Vec<(f64, f64)> = parsed
+                    .asks
+                    .iter()
+                    .filter_map(|lvl| Some((lvl[0].parse().ok()?, lvl[1].parse().ok()?)))
+                    .collect();
+                if bids.is_empty() || asks.is_empty() {
+                    return None;
+                }
+                Some(crate::models::BookDepth {
+                    timestamp: parsed._last_update_id,
+                    bids,
+                    asks,
+                })
+            }
+            _ => None,
+        }
+    });
+    Ok(mapped)
 }

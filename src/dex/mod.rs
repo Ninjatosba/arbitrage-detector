@@ -25,6 +25,7 @@ abigen!(
 );
 
 /// Handle for interacting with a specific Uniswap V3 pool.
+#[derive(Clone)]
 pub struct Dex {
     pool: UniswapV3Pool<Provider<Http>>,
 }
@@ -53,6 +54,11 @@ impl Dex {
 
     /// Converts `sqrtPriceX96` (token1/token0) to a human-readable USDC per ETH price.
     /// Assumes token0=WETH (18 decimals) token1=USDC (6 decimals).
+    pub async fn fetch_price_usdc_per_eth(&self) -> Result<BigDecimal> {
+        let (sqrt_price_x96, _, _, _, _, _, _) = self.pool.slot_0().call().await?;
+        Ok(Self::price_usdc_per_eth(sqrt_price_x96))
+    }
+
     pub fn price_usdc_per_eth(sqrt_price_x96: U256) -> BigDecimal {
         // Convert sqrtPriceX96 -> BigDecimal
         let sqrt_bd = BigDecimal::from_str(&sqrt_price_x96.to_string())

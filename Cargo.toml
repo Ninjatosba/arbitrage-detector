@@ -18,4 +18,5 @@ edition = "2024"
  futures = "0.3"
 num-bigint = "0.4"
 num-traits = "0.2"
+url = "2"
 
