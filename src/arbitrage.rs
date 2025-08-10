@@ -52,27 +52,36 @@ fn evaluate_direction_a(
     book: &BookDepth,
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
-    let (bid_price, bid_qty) = book.bids[0];
+    let (bid_price, bid_qty_cex) = book.bids[0];
 
-    // Calculate how much USDC we need to spend to get ETH on DEX
+    // Target: raise pool price UP to `bid_price` by buying (USDC in, ETH out)
+    let usdc_budget = bid_price * bid_qty_cex;
     let res = calculate_swap(
         pool_state,
         bid_price,
-        SwapDirection::Token1ToToken0, // USDC → ETH
+        SwapDirection::Token0ToToken1, // USDC in on DEX
         config.dex_fee_bps,
-        bid_qty, // Max ETH we can sell on CEX
+        usdc_budget,
     );
 
-    let token1_in = res.amount_in; // USDC spent
-    let token0_out = res.amount_out; // ETH received
+    let mut token1_in = res.amount_in; // USDC we will spend on DEX
+    let mut token0_out = res.amount_out; // ETH we obtain from DEX
+
+    // Ensure we don't exceed CEX depth; scale down if necessary
+    if token0_out > bid_qty_cex {
+        let scale = bid_qty_cex / token0_out;
+        token0_out = bid_qty_cex;
+        token1_in *= scale;
+    }
 
     if token0_out <= 0.0 {
         return None;
     }
 
-    // Calculate PnL: (CEX sell price - DEX buy price) * amount - fees - gas
+    // Calculate PnL: revenue on CEX minus cost on DEX minus gas.
+    // Do NOT apply DEX fee again (already included in quote). Apply only CEX fee.
     let revenue_total = bid_price * token0_out * (1.0 - config.cex_fee_bps / 10_000.0);
-    let cost_total = token1_in * (1.0 + config.dex_fee_bps / 10_000.0);
+    let cost_total = token1_in; // USDC spent already includes DEX LP fee
     let pnl = revenue_total - cost_total - config.gas_cost_usdc;
 
     if pnl >= config.min_pnl_usdc {
@@ -98,29 +107,34 @@ fn evaluate_direction_b(
     _dex_price: f64,
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
-    let (ask_price, ask_qty) = book.asks[0];
-    println!("ask_qty: {}", ask_qty);
+    let (ask_price, ask_qty_cex) = book.asks[0];
 
-    // Calculate how much ETH we can sell on DEX for the CEX ask price
     let res = calculate_swap(
         pool_state,
         ask_price,
-        SwapDirection::Token0ToToken1, // ETH → USDC
+        SwapDirection::Token1ToToken0, // ETH in on DEX
         config.dex_fee_bps,
-        ask_qty,
+        ask_qty_cex,
     );
 
-    let token0_in = res.amount_in;
-    let token1_out = res.amount_out;
+    let mut token0_in = res.amount_in; // ETH to sell on DEX
+    let mut token1_out = res.amount_out; // USDC received from DEX
+
+    // Clamp to CEX depth
+    if token0_in > ask_qty_cex {
+        let scale = ask_qty_cex / token0_in;
+        token0_in = ask_qty_cex;
+        token1_out *= scale;
+    }
 
     if token0_in <= 1e-8 {
         return None;
     }
 
-    // Calculate PnL: (DEX sell price - CEX buy price) * amount - fees - gas
+    // PnL: revenue on DEX (already net of DEX fee) minus cost to acquire ETH on CEX (includes CEX taker fee) minus gas.
     let cost_total = ask_price * token0_in * (1.0 + config.cex_fee_bps / 10_000.0);
-    let revenue_total = token1_out * (1.0 - config.dex_fee_bps / 10_000.0);
-    let pnl = (revenue_total - cost_total - config.gas_cost_usdc) / 1e6;
+    let revenue_total = token1_out; // USDC out already net of DEX fee in quote
+    let pnl = revenue_total - cost_total - config.gas_cost_usdc;
 
     if pnl >= config.min_pnl_usdc {
         let description = format!(

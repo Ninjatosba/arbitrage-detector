@@ -134,13 +134,19 @@ impl Dex {
 
     /// Convert sqrtPriceX96 to USDC per ETH price
     pub fn price_usdc_per_eth(sqrt_price_x96: U256) -> f64 {
-        let sqrt_price = sqrt_price_x96.as_u128() as f64 / 2.0_f64.powi(96);
-        let price = sqrt_price * sqrt_price;
+        // sqrtPriceX96 = sqrt(token1/token0) * 2^96 where token1/token0 are in nominal units
+        // For WETH/USDC: sqrtPriceX96 = sqrt(USDC/WETH) * 2^96 where both are in nominal units
+        let s = sqrt_price_x96.to_string();
+        let sqrt_q96 = s.parse::<f64>().unwrap_or(0.0) / 2.0_f64.powi(96);
+        if sqrt_q96 <= 0.0 {
+            return 0.0;
+        }
+        // price = token1/token0 in nominal units (USDC per ETH)
+        let ratio_raw = sqrt_q96 * sqrt_q96; // token1_raw / token0_raw
 
-        // From debug output: sqrt_price=15418, price=237724591
-        // This means sqrtPriceX96 = sqrt(ETH/USDC) in Q96
-        // We want USDC/ETH, so take the inverse
-        // But price is in raw units, need to adjust for decimals
-        (1.0 / price) * 10_f64.powi(12)
+        // Convert raw ratio to human price (USDC per 1 ETH)
+        let price = (1.0 / ratio_raw) * 10_f64.powi(18 - 6);
+
+        price
     }
 }

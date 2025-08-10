@@ -11,8 +11,10 @@ pub struct SwapResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapDirection {
-    Token0ToToken1, // ETH → USDC (price decreases)(Selling ETH)
-    Token1ToToken0, // USDC → ETH (price increases)(Buying ETH)
+    /// token0 (USDC) in  → token1 (WETH) out → price UP  → √P increases
+    Token0ToToken1,
+    /// token1 (WETH) in → token0 (USDC) out → price DOWN → √P decreases
+    Token1ToToken0,
 }
 
 /// Calculate swap amounts using V3 math (single tick only)
@@ -34,9 +36,47 @@ pub fn calculate_swap(
     fee_bps: f64,
     max_amount: f64,
 ) -> SwapResult {
-    // Convert Q96 sqrtPriceX96 to f64 sqrt price
+    // Convert Q96 sqrtPriceX96 to f64 sqrt price (sqrt(token1/token0) in raw units)
     let sqrt_price_start = q96_to_f64(&pool.sqrt_price_x96);
-    let sqrt_price_target = f64::sqrt(target_price);
+
+    // Target price is expected in *decimal* terms: token0 per token1 (e.g. USDC per ETH).
+    // Uniswap math, however, works with the raw ratio token1/token0 in nominal units.
+    // token1/token0  =  (1 / price_token0_per_token1) * 10^(dec0 - dec1)
+    let decimals_factor = 10_f64.powi(pool.token0_decimals as i32 - pool.token1_decimals as i32); // 10^(18-6)=1e12
+    // ratio_raw = price / 10^12
+    let ratio_target_raw = if target_price > 0.0 {
+        decimals_factor / target_price
+    } else {
+        0.0
+    };
+
+    let sqrt_price_target = f64::sqrt(ratio_target_raw);
+
+    // Clamp target sqrt within current tick boundaries if provided
+    let mut effective_sqrt_target = sqrt_price_target;
+    let mut hit_boundary = false;
+    match direction {
+        // price UP → sqrt increases → clamp to UPPER boundary
+        SwapDirection::Token0ToToken1 => {
+            if let Some(upper_q96) = pool.limit_upper_sqrt_price_x96 {
+                let upper = q96_to_f64(&upper_q96);
+                if upper > 0.0 && effective_sqrt_target > upper {
+                    effective_sqrt_target = upper;
+                    hit_boundary = true;
+                }
+            }
+        }
+        // price DOWN → sqrt decreases → clamp to LOWER boundary
+        SwapDirection::Token1ToToken0 => {
+            if let Some(lower_q96) = pool.limit_lower_sqrt_price_x96 {
+                let lower = q96_to_f64(&lower_q96);
+                if lower > 0.0 && effective_sqrt_target < lower {
+                    effective_sqrt_target = lower;
+                    hit_boundary = true;
+                }
+            }
+        }
+    }
 
     // Liquidity as f64
     let liquidity_f64 = pool.liquidity as f64;
@@ -55,11 +95,11 @@ pub fn calculate_swap(
         };
     }
 
-    // Check if target price is in correct direction
+    // Adjust direction validation after clamping
     match direction {
+        // USDC in, price UP ⇒ sqrt_target must be > start
         SwapDirection::Token0ToToken1 => {
-            if sqrt_price_target >= sqrt_price_start {
-                // Selling token0 should push price DOWN.
+            if effective_sqrt_target <= sqrt_price_start {
                 return SwapResult {
                     amount_in: 0.0,
                     amount_out: 0.0,
@@ -69,9 +109,9 @@ pub fn calculate_swap(
                 };
             }
         }
+        // WETH in, price DOWN ⇒ sqrt_target must be < start
         SwapDirection::Token1ToToken0 => {
-            if sqrt_price_target <= sqrt_price_start {
-                // Buying ETH should push price UP.
+            if effective_sqrt_target >= sqrt_price_start {
                 return SwapResult {
                     amount_in: 0.0,
                     amount_out: 0.0,
@@ -85,23 +125,23 @@ pub fn calculate_swap(
 
     // Main calculation
     let (amount_in, amount_out) = match direction {
+        // token0 -> token1 (USDC in, price UP)
         SwapDirection::Token0ToToken1 => {
-            // Selling token0 (price decreases)
-            let amount0_in = liquidity_f64 * (1.0 / sqrt_price_target - 1.0 / sqrt_price_start);
-            let amount1_out = liquidity_f64 * (sqrt_price_start - sqrt_price_target);
+            let amount0_in_no_fee =
+                liquidity_f64 * (1.0 / sqrt_price_start - 1.0 / effective_sqrt_target);
+            let amount1_out = liquidity_f64 * (sqrt_price_start - effective_sqrt_target).max(0.0);
 
-            // Apply fee on input side
-            let amount0_in_with_fee = amount0_in / (1.0 - fee_fraction);
+            let amount0_in_with_fee = amount0_in_no_fee / (1.0 - fee_fraction);
 
             (amount0_in_with_fee, amount1_out)
         }
+        // token1 -> token0 (ETH in, price DOWN)
         SwapDirection::Token1ToToken0 => {
-            // Selling token1 (price increases)
-            let amount1_in = liquidity_f64 * (sqrt_price_target - sqrt_price_start);
-            let amount0_out = liquidity_f64 * (1.0 / sqrt_price_start - 1.0 / sqrt_price_target);
+            let amount1_in_no_fee = liquidity_f64 * (sqrt_price_start - effective_sqrt_target);
+            let amount0_out =
+                liquidity_f64 * (1.0 / effective_sqrt_target - 1.0 / sqrt_price_start);
 
-            // Apply fee on input side
-            let amount1_in_with_fee = amount1_in / (1.0 - fee_fraction);
+            let amount1_in_with_fee = amount1_in_no_fee / (1.0 - fee_fraction);
 
             (amount1_in_with_fee, amount0_out)
         }
@@ -119,18 +159,31 @@ pub fn calculate_swap(
         final_amount_out = amount_out * scale;
     }
 
-    // Execution price = amount_in / amount_out in correct token terms
-    let execution_price = if final_amount_out > 0.0 {
-        final_amount_in / final_amount_out
-    } else {
-        0.0
+    // Execution price: quote in USDC per ETH regardless of direction
+    let execution_price = match direction {
+        // USDC in, ETH out: price = USDC / ETH = amount0_in / amount1_out
+        SwapDirection::Token0ToToken1 => {
+            if final_amount_out > 0.0 {
+                final_amount_in / final_amount_out
+            } else {
+                0.0
+            }
+        }
+        // WETH in, USDC out: price = USDC / ETH = amount0_out / amount1_in
+        SwapDirection::Token1ToToken0 => {
+            if final_amount_out > 0.0 {
+                final_amount_out / final_amount_in
+            } else {
+                0.0
+            }
+        }
     };
 
     SwapResult {
         amount_in: final_amount_in,
         amount_out: final_amount_out,
         execution_price,
-        hit_boundary: false, // For multi-tick handling, you'd set this if you hit tick limit
+        hit_boundary,
         capped_by_max,
     }
 }
@@ -138,9 +191,12 @@ pub fn calculate_swap(
 // ---------- helper functions ----------
 
 fn q96_to_f64(q96: &ethers::types::U256) -> f64 {
+    // Convert full 256-bit integer to decimal string then to f64 to avoid truncation
+    // Then divide by 2^96 to get the floating sqrt price
+    let s = q96.to_string();
+    let int_val = s.parse::<f64>().unwrap_or(0.0);
     let two_pow_96 = 2.0_f64.powi(96);
-    let num = q96.as_u128() as f64;
-    num / two_pow_96
+    int_val / two_pow_96
 }
 
 #[cfg(test)]
