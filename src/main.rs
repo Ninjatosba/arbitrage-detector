@@ -31,9 +31,9 @@ async fn main() -> Result<()> {
     let dex = Dex::new(&config.rpc_url, Address::from_str(&config.pool_address)?).await?;
 
     // Initialize pool state watcher
-    let (pool_tx, pool_rx) = watch::channel::<arbitrage_detector::dex::PoolState>(
-        dex.get_pool_state(18, 6, None, None).await?,
-    );
+    let initial_pool_state = dex.get_pool_state(6, 18, None, None).await?;
+    let (pool_tx, pool_rx) =
+        watch::channel::<arbitrage_detector::dex::PoolState>(initial_pool_state);
     let _pool_handle = init_pool_state_watcher(&dex, pool_tx).await?;
 
     // Initialize gas price watcher
@@ -45,26 +45,9 @@ async fn main() -> Result<()> {
     let dex_task = spawn_dex_price_watcher(dex.clone(), dex_tx).await;
     let cex_task = spawn_cex_stream_watcher("ethusdt", cex_tx).await?;
 
-    // Get pool fee for configuration
-    let pool_fee_bps = {
-        if let Ok(bps) = dex.get_pool_fee_bps().await {
-            bps as f64
-        } else {
-            30.0
-        }
-    };
-
     // Spawn arbitrage evaluator
-    let _evaluator_task = spawn_arbitrage_evaluator(
-        dex_rx,
-        cex_rx,
-        pool_rx,
-        gas_rx,
-        config.min_pnl_usdc,
-        pool_fee_bps,
-        gas_config,
-    )
-    .await;
+    let _evaluator_task =
+        spawn_arbitrage_evaluator(dex_rx, cex_rx, pool_rx, gas_rx, gas_config).await;
 
     // Wait indefinitely for producer tasks (they never finish)
     let _ = futures::join!(dex_task, cex_task);

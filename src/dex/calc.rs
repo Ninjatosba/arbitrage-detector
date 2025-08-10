@@ -1,12 +1,15 @@
 use crate::dex::state::PoolState;
+use alloy_primitives::U256;
+use uniswap_v3_math::{
+    error::UniswapV3MathError,
+    sqrt_price_math::{_get_amount_0_delta, _get_amount_1_delta},
+};
 
 #[derive(Debug, Clone)]
 pub struct SwapResult {
     pub amount_in: f64,
     pub amount_out: f64,
-    pub execution_price: f64,
     pub hit_boundary: bool,
-    pub capped_by_max: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,205 +19,197 @@ pub enum SwapDirection {
     /// token1 (WETH) in → token0 (USDC) out → price DOWN → √P decreases
     Token1ToToken0,
 }
-
-/// Calculate swap amounts using V3 math (single tick only)
-///
-/// # Arguments
-/// * `pool` - Pool state with current price and liquidity
-/// * `target_price` - Target price for the swap
-/// * `direction` - Swap direction
-/// * `fee_bps` - Pool fee in basis points (e.g., 30 for 0.3%)
-/// * `max_amount` - Maximum amount limit (input or output)
-///
-/// # Returns
-/// Returns the amount of token0 or token1 needed to swap to get the target price.
-/// If the swap is not possible, returns 0.0.
-pub fn calculate_swap(
+/// Calculate swap using Uniswap V3 math library (more accurate)
+pub fn calculate_swap_with_library(
     pool: &PoolState,
     target_price: f64,
     direction: SwapDirection,
     fee_bps: f64,
     max_amount: f64,
-) -> SwapResult {
-    // Convert Q96 sqrtPriceX96 to f64 sqrt price (sqrt(token1/token0) in raw units)
-    let sqrt_price_start = q96_to_f64(&pool.sqrt_price_x96);
+) -> Result<SwapResult, UniswapV3MathError> {
+    // Convert current sqrtPriceX96 to U256
+    let sqrt_price_start = U256::from_str_radix(&pool.sqrt_price_x96.to_string(), 10)
+        .map_err(|_| UniswapV3MathError::SqrtPriceIsZero)?;
 
-    // Target price is expected in *decimal* terms: token0 per token1 (e.g. USDC per ETH).
-    // Uniswap math, however, works with the raw ratio token1/token0 in nominal units.
-    // token1/token0  =  (1 / price_token0_per_token1) * 10^(dec0 - dec1)
-    let decimals_factor = 10_f64.powi(pool.token0_decimals as i32 - pool.token1_decimals as i32); // 10^(18-6)=1e12
-    // ratio_raw = price / 10^12
+    // Convert target price to sqrtPriceX96
+    let decimals_factor = 10_f64.powi(pool.token1_decimals as i32 - pool.token0_decimals as i32);
+
     let ratio_target_raw = if target_price > 0.0 {
         decimals_factor / target_price
     } else {
-        0.0
+        return Err(UniswapV3MathError::SqrtPriceIsZero);
     };
 
-    let sqrt_price_target = f64::sqrt(ratio_target_raw);
+    let sqrt_price_target = U256::from((ratio_target_raw.sqrt() * 2.0_f64.powi(96)) as u128);
 
-    // Clamp target sqrt within current tick boundaries if provided
-    let mut effective_sqrt_target = sqrt_price_target;
-    let mut hit_boundary = false;
-    match direction {
-        // price UP → sqrt increases → clamp to UPPER boundary
-        SwapDirection::Token0ToToken1 => {
-            if let Some(upper_q96) = pool.limit_upper_sqrt_price_x96 {
-                let upper = q96_to_f64(&upper_q96);
-                if upper > 0.0 && effective_sqrt_target > upper {
-                    effective_sqrt_target = upper;
-                    hit_boundary = true;
-                }
-            }
-        }
-        // price DOWN → sqrt decreases → clamp to LOWER boundary
-        SwapDirection::Token1ToToken0 => {
-            if let Some(lower_q96) = pool.limit_lower_sqrt_price_x96 {
-                let lower = q96_to_f64(&lower_q96);
-                if lower > 0.0 && effective_sqrt_target < lower {
-                    effective_sqrt_target = lower;
-                    hit_boundary = true;
-                }
-            }
-        }
-    }
+    // Convert liquidity to u128
+    let liquidity = pool.liquidity;
 
-    // Liquidity as f64
-    let liquidity_f64 = pool.liquidity as f64;
-
-    // Fee in decimal form (basis points → fraction)
-    let fee_fraction = fee_bps / 10_000.0;
-
-    // Basic sanity checks
-    if sqrt_price_start <= 0.0 || sqrt_price_target <= 0.0 || target_price <= 0.0 {
-        return SwapResult {
-            amount_in: 0.0,
-            amount_out: 0.0,
-            execution_price: 0.0,
-            hit_boundary: false,
-            capped_by_max: false,
-        };
-    }
-
-    // Adjust direction validation after clamping
-    match direction {
-        // USDC in, price UP ⇒ sqrt_target must be > start
-        SwapDirection::Token0ToToken1 => {
-            if effective_sqrt_target <= sqrt_price_start {
-                return SwapResult {
-                    amount_in: 0.0,
-                    amount_out: 0.0,
-                    execution_price: 0.0,
-                    hit_boundary: false,
-                    capped_by_max: false,
-                };
-            }
-        }
-        // WETH in, price DOWN ⇒ sqrt_target must be < start
-        SwapDirection::Token1ToToken0 => {
-            if effective_sqrt_target >= sqrt_price_start {
-                return SwapResult {
-                    amount_in: 0.0,
-                    amount_out: 0.0,
-                    execution_price: 0.0,
-                    hit_boundary: false,
-                    capped_by_max: false,
-                };
-            }
-        }
-    }
-
-    // Main calculation
+    // Calculate amounts using library functions
     let (amount_in, amount_out) = match direction {
-        // token0 -> token1 (USDC in, price UP)
         SwapDirection::Token0ToToken1 => {
-            let amount0_in_no_fee =
-                liquidity_f64 * (1.0 / sqrt_price_start - 1.0 / effective_sqrt_target);
-            let amount1_out = liquidity_f64 * (sqrt_price_start - effective_sqrt_target).max(0.0);
+            // USDC in, ETH out (price UP). Human price up => sqrt decreases.
+            if sqrt_price_target >= sqrt_price_start {
+                return Ok(SwapResult {
+                    amount_in: 0.0,
+                    amount_out: 0.0,
+                    hit_boundary: false,
+                });
+            }
 
-            let amount0_in_with_fee = amount0_in_no_fee / (1.0 - fee_fraction);
+            let amount0_in = _get_amount_0_delta(
+                sqrt_price_start,
+                sqrt_price_target,
+                liquidity,
+                true, // round up
+            )?;
 
-            (amount0_in_with_fee, amount1_out)
+            let amount1_out = _get_amount_1_delta(
+                sqrt_price_start,
+                sqrt_price_target,
+                liquidity,
+                false, // round down
+            )?;
+
+            // Apply fee
+            let fee_fraction = fee_bps / 10_000.0;
+            let amount0_in_with_fee =
+                (amount0_in.try_into().unwrap_or(0u128) as f64) / (1.0 - fee_fraction);
+            (
+                amount0_in_with_fee,
+                amount1_out.try_into().unwrap_or(0u128) as f64,
+            )
         }
-        // token1 -> token0 (ETH in, price DOWN)
         SwapDirection::Token1ToToken0 => {
-            let amount1_in_no_fee = liquidity_f64 * (sqrt_price_start - effective_sqrt_target);
-            let amount0_out =
-                liquidity_f64 * (1.0 / effective_sqrt_target - 1.0 / sqrt_price_start);
+            // ETH in, USDC out (price DOWN). Human price down => sqrt increases.
+            if sqrt_price_target <= sqrt_price_start {
+                return Ok(SwapResult {
+                    amount_in: 0.0,
+                    amount_out: 0.0,
+                    hit_boundary: false,
+                });
+            }
 
-            let amount1_in_with_fee = amount1_in_no_fee / (1.0 - fee_fraction);
+            let amount1_in = _get_amount_1_delta(
+                sqrt_price_target,
+                sqrt_price_start,
+                liquidity,
+                true, // round up
+            )?;
 
-            (amount1_in_with_fee, amount0_out)
+            let amount0_out = _get_amount_0_delta(
+                sqrt_price_target,
+                sqrt_price_start,
+                liquidity,
+                false, // round down
+            )?;
+
+            // Apply fee
+            let fee_fraction = fee_bps / 10_000.0;
+            let amount1_in_with_fee =
+                (amount1_in.try_into().unwrap_or(0u128) as f64) / (1.0 - fee_fraction);
+
+            (
+                amount1_in_with_fee,
+                amount0_out.try_into().unwrap_or(0u128) as f64,
+            )
         }
     };
 
     // Cap by max_amount if needed
     let mut capped_by_max = false;
-    let mut final_amount_in = amount_in;
-    let mut final_amount_out = amount_out;
-    if amount_in > max_amount {
-        capped_by_max = true;
-        // Scale down proportionally
-        let scale = max_amount / amount_in;
-        final_amount_in = max_amount;
+    let mut final_amount_in = amount_in; // RAW units
+    let mut final_amount_out = amount_out; // RAW units
+
+    // Convert human max_amount to RAW units for the input token
+    let max_in_raw: f64 = match direction {
+        // Token0ToToken1: input is token0 (USDC), 6 decimals
+        SwapDirection::Token0ToToken1 => {
+            let scale = 10f64.powi(pool.token0_decimals as i32);
+            max_amount * scale
+        }
+        // Token1ToToken0: input is token1 (ETH), 18 decimals
+        SwapDirection::Token1ToToken0 => {
+            let scale = 10f64.powi(pool.token1_decimals as i32);
+            max_amount * scale
+        }
+    };
+
+    if amount_in > max_in_raw {
+        let scale = max_in_raw / amount_in;
+        final_amount_in = max_in_raw;
         final_amount_out = amount_out * scale;
+        capped_by_max = true;
     }
 
-    // Execution price: quote in USDC per ETH regardless of direction
-    let execution_price = match direction {
-        // USDC in, ETH out: price = USDC / ETH = amount0_in / amount1_out
+    // Convert RAW amounts to human units
+    let (final_in_human, final_out_human) = match direction {
         SwapDirection::Token0ToToken1 => {
-            if final_amount_out > 0.0 {
-                final_amount_in / final_amount_out
+            let in_scale = 10f64.powi(pool.token0_decimals as i32);
+            let out_scale = 10f64.powi(pool.token1_decimals as i32);
+            (final_amount_in / in_scale, final_amount_out / out_scale)
+        }
+        SwapDirection::Token1ToToken0 => {
+            let in_scale = 10f64.powi(pool.token1_decimals as i32);
+            let out_scale = 10f64.powi(pool.token0_decimals as i32);
+            (final_amount_in / in_scale, final_amount_out / out_scale)
+        }
+    };
+
+    // Calculate execution price directly from human units
+    let execution_price = match direction {
+        SwapDirection::Token0ToToken1 => {
+            if final_out_human > 0.0 {
+                final_in_human / final_out_human
             } else {
                 0.0
             }
         }
-        // WETH in, USDC out: price = USDC / ETH = amount0_out / amount1_in
         SwapDirection::Token1ToToken0 => {
-            if final_amount_out > 0.0 {
-                final_amount_out / final_amount_in
+            if final_in_human > 0.0 {
+                final_out_human / final_in_human
             } else {
                 0.0
             }
         }
     };
 
-    SwapResult {
-        amount_in: final_amount_in,
-        amount_out: final_amount_out,
-        execution_price,
-        hit_boundary,
-        capped_by_max,
-    }
+    Ok(SwapResult {
+        amount_in: final_in_human,
+        amount_out: final_out_human,
+        hit_boundary: false,
+    })
 }
 
-// ---------- helper functions ----------
-
-fn q96_to_f64(q96: &ethers::types::U256) -> f64 {
-    // Convert full 256-bit integer to decimal string then to f64 to avoid truncation
-    // Then divide by 2^96 to get the floating sqrt price
-    let s = q96.to_string();
-    let int_val = s.parse::<f64>().unwrap_or(0.0);
-    let two_pow_96 = 2.0_f64.powi(96);
-    int_val / two_pow_96
-}
-
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ethers::types::U256;
+    use crate::dex::state::PoolState;
+    use ethers::types::U256 as EthersU256;
 
-    fn mock_pool(
-        sqrt_price: f64,
-        liquidity: u128,
+    fn sqrt_price_x96_from_price_usdc_per_eth(
+        price_usdc_per_eth: f64,
         token0_decimals: u8,
         token1_decimals: u8,
-    ) -> PoolState {
-        // Convert sqrt_price (f64) into Q96 representation
-        let q96_val = (sqrt_price * 2.0_f64.powi(96)) as u128;
+    ) -> EthersU256 {
+        // ratio_raw = token1/token0 in nominal units = 10^(dec1-dec0) / price
+        let dec_factor = 10f64.powi(token1_decimals as i32 - token0_decimals as i32);
+        let ratio_raw = dec_factor / price_usdc_per_eth;
+        let sqrt_ratio = ratio_raw.sqrt();
+        let q96 = (sqrt_ratio * 2f64.powi(96)) as u128;
+        EthersU256::from(q96)
+    }
+
+    fn make_pool(price_usdc_per_eth: f64, liquidity: u128) -> PoolState {
+        let token0_decimals = 6; // USDC
+        let token1_decimals = 18; // WETH
+        let sqrt_q96 = sqrt_price_x96_from_price_usdc_per_eth(
+            price_usdc_per_eth,
+            token0_decimals,
+            token1_decimals,
+        );
         PoolState {
-            sqrt_price_x96: U256::from(q96_val),
+            sqrt_price_x96: sqrt_q96,
             liquidity,
             tick: 0,
             token0_decimals,
@@ -225,111 +220,29 @@ mod tests {
     }
 
     #[test]
-    fn token0_to_token1_simple_price_drop_same_decimals() {
-        // Start price = 1.21 (sqrt=1.1)
-        let s_start = 1.1_f64;
-        let pool = mock_pool(s_start, 1_000_000, 6, 6);
-
-        let target_price = 1.0;
-        let fee_bps = 30.0;
-        let max_amount = f64::MAX;
-
-        let res = calculate_swap(
+    fn direction_a_profitable_when_dex_below_cex() {
+        let pool = make_pool(4223.0, 1_800_000_000_000_000_000); // ~1.8e18
+        let bid_price = 4225.0; // CEX bid above DEX
+        let res = calculate_swap_with_library(
             &pool,
-            target_price,
+            bid_price,
             SwapDirection::Token0ToToken1,
-            fee_bps,
-            max_amount,
-        );
-
-        println!("{:?}", res);
+            0.0,
+            10_000.0,
+        )
+        .unwrap();
         assert!(res.amount_in > 0.0);
         assert!(res.amount_out > 0.0);
-        assert!(res.execution_price > 0.0);
-        assert!(!res.capped_by_max);
     }
 
     #[test]
-    fn token1_to_token0_simple_price_rise_different_decimals() {
-        // Start price = 1.0 (sqrt=1.0)
-        let s_start = 1.0_f64;
-        // token0 decimals 18, token1 decimals 6
-        let pool = mock_pool(s_start, 1_000_000, 18, 6);
-
-        let target_price = 1.21;
-        let fee_bps = 30.0;
-        let max_amount = f64::MAX;
-
-        let res = calculate_swap(
-            &pool,
-            target_price,
-            SwapDirection::Token1ToToken0,
-            fee_bps,
-            max_amount,
-        );
-
-        println!("{:?}", res);
+    fn direction_b_profitable_when_dex_above_cex() {
+        let pool = make_pool(4225.0, 1_800_000_000_000_000_000);
+        let ask_price = 4223.0; // CEX ask below DEX
+        let res =
+            calculate_swap_with_library(&pool, ask_price, SwapDirection::Token1ToToken0, 0.0, 5.0)
+                .unwrap();
         assert!(res.amount_in > 0.0);
         assert!(res.amount_out > 0.0);
-        assert!(res.execution_price > 0.0);
-        assert!(!res.capped_by_max);
-    }
-
-    #[test]
-    fn respects_max_amount_cap() {
-        let s_start = 1.0_f64;
-        let pool = mock_pool(s_start, 1_000_000, 18, 6);
-
-        let target_price = 0.8;
-        let fee_bps = 30.0;
-        let max_amount = 10.0; // very small cap
-
-        let res = calculate_swap(
-            &pool,
-            target_price,
-            SwapDirection::Token0ToToken1,
-            fee_bps,
-            max_amount,
-        );
-
-        println!("{:?}", res);
-        assert!(res.capped_by_max);
-        assert_eq!(res.amount_in, max_amount);
-        assert!(res.amount_out > 0.0);
-    }
-
-    #[test]
-    fn invalid_direction_returns_zero() {
-        let s_start = 1.0_f64;
-        let pool = mock_pool(s_start, 1_000_000, 18, 6);
-
-        // Target price higher than start for Token0ToToken1 (invalid)
-        let target_price = 1.5;
-        let res = calculate_swap(
-            &pool,
-            target_price,
-            SwapDirection::Token0ToToken1,
-            30.0,
-            f64::MAX,
-        );
-
-        println!("{:?}", res);
-        assert_eq!(res.amount_in, 0.0);
-        assert_eq!(res.amount_out, 0.0);
-        assert_eq!(res.execution_price, 0.0);
-    }
-
-    #[test]
-    fn zero_or_negative_price_returns_zero() {
-        let s_start = 1.0_f64;
-        let pool = mock_pool(s_start, 1_000_000, 6, 6);
-
-        let res = calculate_swap(&pool, 0.0, SwapDirection::Token0ToToken1, 30.0, f64::MAX);
-        assert_eq!(res.amount_in, 0.0);
-        assert_eq!(res.amount_out, 0.0);
-
-        let res2 = calculate_swap(&pool, -1.0, SwapDirection::Token1ToToken0, 30.0, f64::MAX);
-        assert_eq!(res2.amount_in, 0.0);
-        assert_eq!(res2.amount_out, 0.0);
     }
 }

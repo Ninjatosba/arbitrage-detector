@@ -44,7 +44,7 @@ pub async fn init_pool_state_watcher(
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             ticker.tick().await;
-            if let Ok(state) = dex_clone.get_pool_state(18, 6, None, None).await {
+            if let Ok(state) = dex_clone.get_pool_state(6, 18, None, None).await {
                 let _ = tx.send(state);
             }
         }
@@ -53,7 +53,7 @@ pub async fn init_pool_state_watcher(
     Ok(rx)
 }
 
-pub use calc::{SwapDirection, SwapResult, calculate_swap};
+pub use calc::{SwapDirection, SwapResult, calculate_swap_with_library};
 pub use state::PoolState;
 
 abigen!(

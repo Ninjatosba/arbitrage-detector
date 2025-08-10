@@ -1,6 +1,6 @@
 //! Arbitrage detection logic.
 
-use crate::dex::{PoolState, SwapDirection, calculate_swap};
+use crate::dex::{PoolState, SwapDirection, calculate_swap_with_library};
 use crate::models::BookDepth;
 
 /// Configuration for arbitrage calculations
@@ -53,16 +53,16 @@ fn evaluate_direction_a(
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
     let (bid_price, bid_qty_cex) = book.bids[0];
+    let effective_bid_price = bid_price * (1.0 - config.cex_fee_bps / 10_000.0);
 
-    // Target: raise pool price UP to `bid_price` by buying (USDC in, ETH out)
-    let usdc_budget = bid_price * bid_qty_cex;
-    let res = calculate_swap(
+    let res = calculate_swap_with_library(
         pool_state,
-        bid_price,
-        SwapDirection::Token0ToToken1, // USDC in on DEX
+        effective_bid_price,
+        SwapDirection::Token0ToToken1,
         config.dex_fee_bps,
-        usdc_budget,
-    );
+        bid_qty_cex,
+    )
+    .unwrap();
 
     let mut token1_in = res.amount_in; // USDC we will spend on DEX
     let mut token0_out = res.amount_out; // ETH we obtain from DEX
@@ -86,8 +86,8 @@ fn evaluate_direction_a(
 
     if pnl >= config.min_pnl_usdc {
         let description = format!(
-            "A: Buy {:.6} ETH on DEX @ ${:.2} → Sell on CEX @ ${:.2} | Earn ${:.2}",
-            token0_out, res.execution_price, bid_price, pnl
+            "A: Buy {:.6} ETH on DEX → Sell on CEX @ ${:.2} | Earn ${:.2}",
+            token0_out, bid_price, pnl
         );
 
         Some(ArbitrageOpportunity {
@@ -108,14 +108,15 @@ fn evaluate_direction_b(
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
     let (ask_price, ask_qty_cex) = book.asks[0];
-
-    let res = calculate_swap(
+    let effective_ask_price = ask_price * (1.0 + config.cex_fee_bps / 10_000.0);
+    let res = calculate_swap_with_library(
         pool_state,
-        ask_price,
-        SwapDirection::Token1ToToken0, // ETH in on DEX
+        effective_ask_price,
+        SwapDirection::Token1ToToken0,
         config.dex_fee_bps,
         ask_qty_cex,
-    );
+    )
+    .unwrap();
 
     let mut token0_in = res.amount_in; // ETH to sell on DEX
     let mut token1_out = res.amount_out; // USDC received from DEX
@@ -131,15 +132,15 @@ fn evaluate_direction_b(
         return None;
     }
 
-    // PnL: revenue on DEX (already net of DEX fee) minus cost to acquire ETH on CEX (includes CEX taker fee) minus gas.
-    let cost_total = ask_price * token0_in * (1.0 + config.cex_fee_bps / 10_000.0);
-    let revenue_total = token1_out; // USDC out already net of DEX fee in quote
+    // Calculate PnL: revenue on DEX minus cost on CEX minus gas
+    let revenue_total = token1_out;
+    let cost_total = effective_ask_price * token0_in;
     let pnl = revenue_total - cost_total - config.gas_cost_usdc;
 
     if pnl >= config.min_pnl_usdc {
         let description = format!(
-            "B: Buy {:.8} ETH on CEX @ ${:.2} → Sell on DEX @ ${:.2} | Earn ${:.2}",
-            token0_in, ask_price, res.execution_price, pnl
+            "B: Buy {:.6} ETH on CEX  → Sell on DEX @ ${:.2} | Earn ${:.2}",
+            token0_in, ask_price, pnl
         );
 
         Some(ArbitrageOpportunity {

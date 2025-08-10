@@ -15,21 +15,11 @@ pub async fn spawn_arbitrage_evaluator(
     cex_rx: watch::Receiver<BookDepth>,
     pool_rx: watch::Receiver<PoolState>,
     gas_rx: watch::Receiver<f64>,
-    min_pnl_usdc: f64,
-    pool_fee_bps: f64,
     gas_config: GasConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
         let mut ticks: u64 = 0;
-
-        tracing::info!(
-            pool_fee_bps,
-            gas_units = gas_config.gas_units,
-            gas_multiplier = gas_config.gas_multiplier,
-            min_pnl_usdc,
-            "[INIT] aggregator started"
-        );
 
         loop {
             ticker.tick().await;
@@ -57,7 +47,7 @@ pub async fn spawn_arbitrage_evaluator(
 
             // Load arbitrage configuration
             let config = ArbitrageConfig {
-                min_pnl_usdc: 0.0, // Negative to see all opportunities
+                min_pnl_usdc: 0.0,
                 dex_fee_bps: 30.0,
                 cex_fee_bps: 10.0,
                 gas_cost_usdc,
@@ -80,8 +70,9 @@ pub async fn spawn_arbitrage_evaluator(
                     bid_price,
                     ask_price,
                     gas_gwei,
-                    pool_fee_bps,
-                    min_pnl_usdc,
+                    config.dex_fee_bps,
+                    config.cex_fee_bps,
+                    config.gas_cost_usdc,
                     "[HEARTBEAT] no opps above threshold"
                 );
             }
