@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     // Initialize pool state watcher
     let (pool_tx, pool_rx) = watch::channel::<arbitrage_detector::dex::PoolState>(
-        dex.get_pool_state(18, 6, None, None, 12).await?,
+        dex.get_pool_state(18, 6, None, None).await?,
     );
     let _pool_handle = init_pool_state_watcher(&dex, pool_tx).await?;
 

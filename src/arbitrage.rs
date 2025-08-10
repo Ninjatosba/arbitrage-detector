@@ -1,9 +1,7 @@
 //! Arbitrage detection logic.
 
-use crate::dex::{PoolState, solve_from_cex_bid, solve_token0_in_for_target_avg_price};
-use crate::models::{BookDepth, Opportunity, PricePoint, TradeQuote};
-use bigdecimal::BigDecimal;
-use std::str::FromStr;
+use crate::dex::{PoolState, SwapDirection, calculate_swap};
+use crate::models::BookDepth;
 
 /// Configuration for arbitrage calculations
 #[derive(Debug, Clone)]
@@ -56,36 +54,33 @@ fn evaluate_direction_a(
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
     let (bid_price, bid_qty) = book.bids[0];
-    let res = solve_from_cex_bid(pool_state, bid_price, bid_qty);
 
-    let token1_in = res
-        .amount_token1_in
-        .to_string()
-        .parse::<f64>()
-        .unwrap_or(0.0);
-    let token0_out = res
-        .amount_token0_out
-        .to_string()
-        .parse::<f64>()
-        .unwrap_or(0.0);
+    // Calculate how much USDC we need to spend to get ETH on DEX
+    let max_usdc_input = bid_price * bid_qty; // Approximate cap
+    let res = calculate_swap(
+        pool_state,
+        max_usdc_input,
+        SwapDirection::Token1ToToken0, // USDC → ETH
+        config.dex_fee_bps,
+        bid_qty, // Max ETH we can sell on CEX
+    );
+
+    let token1_in = res.amount_in; // USDC spent
+    let token0_out = res.amount_out; // ETH received
 
     if token0_out <= 0.0 {
         return None;
     }
 
+    // Calculate PnL: (CEX sell price - DEX buy price) * amount - fees - gas
     let revenue_total = bid_price * token0_out * (1.0 - config.cex_fee_bps / 10_000.0);
     let cost_total = token1_in * (1.0 + config.dex_fee_bps / 10_000.0);
     let pnl = revenue_total - cost_total - config.gas_cost_usdc;
 
     if pnl >= config.min_pnl_usdc {
-        let buy_price = res
-            .realized_avg_price_t1_per_t0
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
         let description = format!(
             "A: Buy {:.6} ETH on DEX @ ${:.2} → Sell on CEX @ ${:.2} | Earn ${:.2}",
-            token0_out, buy_price, bid_price, pnl
+            token0_out, res.execution_price, bid_price, pnl
         );
 
         Some(ArbitrageOpportunity {
@@ -106,52 +101,38 @@ fn evaluate_direction_b(
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
     let (ask_price, ask_qty) = book.asks[0];
-    let price_bd =
-        BigDecimal::from_str(&ask_price.to_string()).unwrap_or_else(|_| BigDecimal::from(0u32));
-    let qty_bd =
-        BigDecimal::from_str(&ask_qty.to_string()).unwrap_or_else(|_| BigDecimal::from(0u32));
 
-    let res = solve_token0_in_for_target_avg_price(pool_state, &price_bd, Some(&qty_bd), None);
+    // Calculate how much ETH we can sell on DEX for the CEX ask price
+    let res = calculate_swap(
+        pool_state,
+        ask_qty,                       // ETH amount to sell
+        SwapDirection::Token0ToToken1, // ETH → USDC
+        config.dex_fee_bps,
+        ask_price * ask_qty, // Max USDC we expect
+    );
 
-    let token0_in = res
-        .amount_token0_in
-        .to_string()
-        .parse::<f64>()
-        .unwrap_or(0.0);
-    let token1_out = res
-        .amount_token1_out
-        .to_string()
-        .parse::<f64>()
-        .unwrap_or(0.0);
+    let token0_in = res.amount_in; // ETH sold
+    let token1_out = res.amount_out; // USDC received
 
     if token0_in <= 1e-8 {
         return None;
     }
 
+    // Calculate PnL: (DEX sell price - CEX buy price) * amount - fees - gas
     let cost_total = ask_price * token0_in * (1.0 + config.cex_fee_bps / 10_000.0);
     let revenue_total = token1_out * (1.0 - config.dex_fee_bps / 10_000.0);
-    let _pnl = revenue_total - cost_total - config.gas_cost_usdc;
+    let pnl = revenue_total - cost_total - config.gas_cost_usdc;
 
-    // Calculate actual sell price from amounts (after fees)
-    let actual_sell_price = (token1_out * (1.0 - config.dex_fee_bps / 10_000.0)) / token0_in;
-
-    // Calculate real PnL: (sell_price - buy_price) * amount - fees - gas
-    let price_diff = actual_sell_price - ask_price;
-    let gross_profit = price_diff * token0_in;
-    let cex_fee = ask_price * token0_in * (config.cex_fee_bps / 10_000.0);
-    let dex_fee = token1_out * (config.dex_fee_bps / 10_000.0);
-    let real_pnl = gross_profit - cex_fee - dex_fee - config.gas_cost_usdc;
-
-    if real_pnl >= config.min_pnl_usdc {
+    if pnl >= config.min_pnl_usdc {
         let description = format!(
             "B: Buy {:.8} ETH on CEX @ ${:.2} → Sell on DEX @ ${:.2} | Earn ${:.2}",
-            token0_in, ask_price, actual_sell_price, real_pnl
+            token0_in, ask_price, res.execution_price, pnl
         );
 
         Some(ArbitrageOpportunity {
             direction: "B".to_string(),
             description,
-            pnl: real_pnl,
+            pnl,
         })
     } else {
         None
@@ -166,32 +147,4 @@ pub fn calculate_gas_cost_usdc(
     dex_price: f64,
 ) -> f64 {
     gas_gwei * 1e-9 * gas_units * gas_multiplier * dex_price
-}
-
-/// Load arbitrage configuration from environment variables
-pub fn load_arbitrage_config(min_pnl_usdc: f64, pool_fee_bps: f64) -> ArbitrageConfig {
-    let dex_fee_bps = if std::env::var("IGNORE_DEX_FEE").unwrap_or_else(|_| "0".into()) == "1" {
-        0.0
-    } else {
-        pool_fee_bps
-    };
-
-    let cex_fee_bps = std::env::var("CEX_FEE_BPS")
-        .unwrap_or_else(|_| "10".into())
-        .parse()
-        .unwrap_or(10.0);
-
-    ArbitrageConfig {
-        min_pnl_usdc,
-        dex_fee_bps,
-        cex_fee_bps,
-        gas_cost_usdc: 0.0, // Will be set later
-    }
-}
-
-/// Evaluate whether an arbitrage opportunity exists (stub).
-///
-/// Returns `Some(Opportunity)` if profitable given the inputs, `None` otherwise.
-pub fn detect(_cex: &PricePoint, _dex: &TradeQuote, _gas_cost: f64) -> Option<Opportunity> {
-    todo!("Implement arbitrage math with fees and gas");
 }

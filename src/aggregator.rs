@@ -1,7 +1,7 @@
 //! Aggregator logic for evaluating arbitrage opportunities.
 
 use crate::{
-    arbitrage::{calculate_gas_cost_usdc, evaluate_opportunities, load_arbitrage_config},
+    arbitrage::{ArbitrageConfig, calculate_gas_cost_usdc, evaluate_opportunities},
     dex::PoolState,
     models::BookDepth,
     utils::GasConfig,
@@ -56,8 +56,13 @@ pub async fn spawn_arbitrage_evaluator(
             );
 
             // Load arbitrage configuration
-            let mut config = load_arbitrage_config(min_pnl_usdc, pool_fee_bps);
-            config.gas_cost_usdc = gas_cost_usdc;
+            let config = ArbitrageConfig {
+                min_pnl_usdc: 0.0, // Negative to see all opportunities
+                dex_fee_bps: 0.0,
+                cex_fee_bps: 0.0,
+                //gas_cost_usdc,
+                gas_cost_usdc: 0.0,
+            };
 
             // Evaluate opportunities
             let opportunities = evaluate_opportunities(&pool_state, &book, dex_price, &config);
