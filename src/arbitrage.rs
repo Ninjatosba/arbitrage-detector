@@ -34,7 +34,7 @@ pub fn evaluate_opportunities(
     }
 
     // Direction A: buy on DEX -> sell on CEX (use CEX bid)
-    if let Some(opp) = evaluate_direction_a(pool_state, book, dex_price, config) {
+    if let Some(opp) = evaluate_direction_a(pool_state, book, config) {
         opportunities.push(opp);
     }
 
@@ -50,16 +50,14 @@ pub fn evaluate_opportunities(
 fn evaluate_direction_a(
     pool_state: &PoolState,
     book: &BookDepth,
-    _dex_price: f64,
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
     let (bid_price, bid_qty) = book.bids[0];
 
     // Calculate how much USDC we need to spend to get ETH on DEX
-    let max_usdc_input = bid_price * bid_qty; // Approximate cap
     let res = calculate_swap(
         pool_state,
-        max_usdc_input,
+        bid_price,
         SwapDirection::Token1ToToken0, // USDC → ETH
         config.dex_fee_bps,
         bid_qty, // Max ETH we can sell on CEX
@@ -101,18 +99,19 @@ fn evaluate_direction_b(
     config: &ArbitrageConfig,
 ) -> Option<ArbitrageOpportunity> {
     let (ask_price, ask_qty) = book.asks[0];
+    println!("ask_qty: {}", ask_qty);
 
     // Calculate how much ETH we can sell on DEX for the CEX ask price
     let res = calculate_swap(
         pool_state,
-        ask_qty,                       // ETH amount to sell
+        ask_price,
         SwapDirection::Token0ToToken1, // ETH → USDC
         config.dex_fee_bps,
-        ask_price * ask_qty, // Max USDC we expect
+        ask_qty,
     );
 
-    let token0_in = res.amount_in; // ETH sold
-    let token1_out = res.amount_out; // USDC received
+    let token0_in = res.amount_in;
+    let token1_out = res.amount_out;
 
     if token0_in <= 1e-8 {
         return None;
@@ -121,7 +120,7 @@ fn evaluate_direction_b(
     // Calculate PnL: (DEX sell price - CEX buy price) * amount - fees - gas
     let cost_total = ask_price * token0_in * (1.0 + config.cex_fee_bps / 10_000.0);
     let revenue_total = token1_out * (1.0 - config.dex_fee_bps / 10_000.0);
-    let pnl = revenue_total - cost_total - config.gas_cost_usdc;
+    let pnl = (revenue_total - cost_total - config.gas_cost_usdc) / 1e6;
 
     if pnl >= config.min_pnl_usdc {
         let description = format!(

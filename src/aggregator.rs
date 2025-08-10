@@ -58,10 +58,9 @@ pub async fn spawn_arbitrage_evaluator(
             // Load arbitrage configuration
             let config = ArbitrageConfig {
                 min_pnl_usdc: 0.0, // Negative to see all opportunities
-                dex_fee_bps: 0.0,
-                cex_fee_bps: 0.0,
-                //gas_cost_usdc,
-                gas_cost_usdc: 0.0,
+                dex_fee_bps: 30.0,
+                cex_fee_bps: 10.0,
+                gas_cost_usdc,
             };
 
             // Evaluate opportunities
