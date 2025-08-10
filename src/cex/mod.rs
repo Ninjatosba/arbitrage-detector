@@ -1,12 +1,10 @@
-//! CEX (Binance) WebSocket client.
-//!
-//! Connects to Binance partial depth stream (`@depth20@100ms`) and yields
-//! a snapshot of the top 20 levels (`BookDepth`) so we can compute VWAP for
-//! arbitrary trade sizes.
+//! CEX (Centralized Exchange) integration.
 
+use crate::models::BookDepth;
 use anyhow::{Context, Result};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
+use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
 use url::Url;
 
@@ -21,8 +19,6 @@ struct DepthMsg {
 }
 
 /// Returns an asynchronous stream of `BookTop`s for the given Binance symbol, e.g. "ethusdt".
-use crate::models::BookDepth;
-
 pub async fn connect_and_stream(symbol: &str) -> Result<impl Stream<Item = BookDepth>> {
     let stream_path = format!("{}@depth20@100ms", symbol.to_lowercase());
     let url = Url::parse(&format!("{}/{}", BINANCE_WS_ENDPOINT, stream_path))?;
@@ -59,4 +55,23 @@ pub async fn connect_and_stream(symbol: &str) -> Result<impl Stream<Item = BookD
         }
     });
     Ok(mapped)
+}
+
+/// Spawn CEX stream watcher task
+pub async fn spawn_cex_stream_watcher(
+    symbol: &str,
+    cex_tx: watch::Sender<BookDepth>,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let symbol = symbol.to_string();
+
+    let handle = tokio::spawn(async move {
+        if let Ok(stream) = connect_and_stream(&symbol).await {
+            futures::pin_mut!(stream);
+            while let Some(book) = stream.next().await {
+                let _ = cex_tx.send(book.clone());
+            }
+        }
+    });
+
+    Ok(handle)
 }

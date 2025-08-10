@@ -1,10 +1,34 @@
 //! Miscellaneous helper utilities.
 
-use tracing_subscriber::{fmt, EnvFilter};
 use anyhow::Result;
-use ethers::providers::{Http, Provider, Middleware};
+use ethers::providers::{Http, Middleware, Provider};
 use std::sync::Arc;
+use tracing_subscriber::{EnvFilter, fmt};
 
+/// Gas configuration loaded from environment variables
+#[derive(Debug, Clone)]
+pub struct GasConfig {
+    pub gas_units: f64,
+    pub gas_multiplier: f64,
+}
+
+/// Load gas configuration from environment variables
+pub fn load_gas_config() -> GasConfig {
+    let gas_units: f64 = std::env::var("GAS_UNITS")
+        .unwrap_or_else(|_| "350000".into())
+        .parse()
+        .unwrap_or(350000.0);
+
+    let gas_multiplier: f64 = std::env::var("GAS_MULTIPLIER")
+        .unwrap_or_else(|_| "1.2".into())
+        .parse()
+        .unwrap_or(1.2);
+
+    GasConfig {
+        gas_units,
+        gas_multiplier,
+    }
+}
 
 /// Initialize `tracing` subscriber with env-based filter.
 ///

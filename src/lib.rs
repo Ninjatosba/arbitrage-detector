@@ -4,6 +4,7 @@
 //! public stubs so that the binary (`main.rs`) can evolve
 //! incrementally without compilation errors.
 
+pub mod aggregator;
 pub mod arbitrage;
 pub mod cex;
 pub mod cli;

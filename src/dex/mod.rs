@@ -21,6 +21,56 @@ use tokio::time::sleep;
 pub mod calc;
 pub mod state;
 
+use tokio::sync::watch;
+use tracing;
+
+/// Spawn DEX price watcher task
+pub async fn spawn_dex_price_watcher(
+    dex: Dex,
+    dex_tx: watch::Sender<f64>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match dex.fetch_price_usdc_per_eth().await {
+                Ok(price_bd) => {
+                    let price_f64: f64 = price_bd.to_string().parse().unwrap_or(0.0);
+                    let _ = dex_tx.send(price_f64);
+                }
+                Err(e) => {
+                    tracing::warn!(?e, "DEX fetch error");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    })
+}
+
+/// Initialize pool state watcher with initial state
+pub async fn init_pool_state_watcher(
+    dex: &Dex,
+    _pool_tx: watch::Sender<PoolState>,
+) -> anyhow::Result<watch::Receiver<PoolState>> {
+    // Initial state fetch
+    let initial = dex
+        .get_pool_state(
+            18,   // token0 decimals (WETH)
+            6,    // token1 decimals (USDC)
+            None, // optional current tick lower sqrt bound
+            None, // optional current tick upper sqrt bound
+            12,   // max segments per side
+        )
+        .await?;
+
+    let (tx, rx) = watch::channel::<PoolState>(initial);
+
+    // Spawn periodic updater (every 5s)
+    let _handle = dex
+        .spawn_pool_state_watcher(18, 6, 5, 12, tx.clone())
+        .await?;
+
+    Ok(rx)
+}
+
 pub use calc::{
     SolveToPriceResult, SwapDirection, solve_for_target_avg_price_multi_tick,
     solve_token0_in_for_target_avg_price,
