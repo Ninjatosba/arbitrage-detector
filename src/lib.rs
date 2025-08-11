@@ -1,9 +1,3 @@
-//! Core library for the arbitrage-detector project.
-//!
-//! This crate only defines the module boundaries and exposes
-//! public stubs so that the binary (`main.rs`) can evolve
-//! incrementally without compilation errors.
-
 pub mod aggregator;
 pub mod arbitrage;
 pub mod cex;

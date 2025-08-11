@@ -1,4 +1,5 @@
 use crate::dex::state::PoolState;
+use crate::models::{SwapDirection, SwapResult};
 use alloy_primitives::U256;
 use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
 use std::str::FromStr;
@@ -7,23 +8,6 @@ use uniswap_v3_math::{
     error::UniswapV3MathError,
     sqrt_price_math::{_get_amount_0_delta, _get_amount_1_delta},
 };
-
-#[derive(Debug, Clone)]
-pub struct SwapResult {
-    pub amount_in: f64,
-    pub amount_out: f64,
-    pub hit_boundary: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SwapDirection {
-    /// token0 (USDC) in  → token1 (WETH) out → price UP  → √P decreases
-    /// When CEX price > DEX price, buy ETH on DEX (USDC→ETH) to profit
-    Token0ToToken1,
-    /// token1 (WETH) in → token0 (USDC) out → price DOWN → √P increases
-    /// When CEX price < DEX price, sell ETH on DEX (ETH→USDC) to profit
-    Token1ToToken0,
-}
 
 /// Calculate swap using Uniswap V3 math library with high precision
 ///

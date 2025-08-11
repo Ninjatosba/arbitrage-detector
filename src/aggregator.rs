@@ -4,7 +4,7 @@ use crate::{
     arbitrage::{ArbitrageConfig, calculate_gas_cost_usdc, evaluate_opportunities},
     dex::PoolState,
     models::BookDepth,
-    utils::GasConfig,
+    config::GasConfig,
 };
 use tokio::sync::watch;
 use tracing;
@@ -15,6 +15,7 @@ pub async fn spawn_arbitrage_evaluator(
     pool_rx: watch::Receiver<PoolState>,
     gas_rx: watch::Receiver<f64>,
     gas_config: GasConfig,
+    min_pnl_usdc: f64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -47,7 +48,7 @@ pub async fn spawn_arbitrage_evaluator(
 
             // Load arbitrage configuration
             let config = ArbitrageConfig {
-                min_pnl_usdc: 0.0,
+                min_pnl_usdc,
                 dex_fee_bps: 30.0,
                 cex_fee_bps: 10.0,
                 gas_cost_usdc,

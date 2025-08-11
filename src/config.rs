@@ -38,3 +38,28 @@ impl AppConfig {
         }
     }
 }
+
+/// Gas configuration loaded from environment variables
+#[derive(Debug, Clone)]
+pub struct GasConfig {
+    pub gas_units: f64,
+    pub gas_multiplier: f64,
+}
+
+/// Load gas configuration from environment variables
+pub fn load_gas_config() -> GasConfig {
+    let gas_units: f64 = std::env::var("GAS_UNITS")
+        .unwrap_or_else(|_| "0".into())
+        .parse()
+        .unwrap_or(350000.0);
+
+    let gas_multiplier: f64 = std::env::var("GAS_MULTIPLIER")
+        .unwrap_or_else(|_| "1.0".into())
+        .parse()
+        .unwrap_or(1.2);
+
+    GasConfig {
+        gas_units,
+        gas_multiplier,
+    }
+}

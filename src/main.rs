@@ -2,9 +2,9 @@ use anyhow::Result;
 use arbitrage_detector::{
     aggregator::spawn_arbitrage_evaluator,
     cex::spawn_cex_stream_watcher,
-    config::AppConfig,
+    config::{AppConfig, load_gas_config},
     dex::{Dex, init_pool_state_watcher},
-    utils::{init_logging, load_gas_config, spawn_gas_price_watcher},
+    utils::{init_logging, spawn_gas_price_watcher},
 };
 use ethers::types::Address;
 use std::str::FromStr;
@@ -44,7 +44,14 @@ async fn main() -> Result<()> {
     let cex_task = spawn_cex_stream_watcher("ethusdt", cex_tx).await?;
 
     // Spawn arbitrage evaluator
-    let _evaluator_task = spawn_arbitrage_evaluator(cex_rx, pool_rx, gas_rx, gas_config).await;
+    let _evaluator_task = spawn_arbitrage_evaluator(
+        cex_rx,
+        pool_rx,
+        gas_rx,
+        gas_config,
+        config.min_pnl_usdc,
+    )
+    .await;
 
     // Wait indefinitely for producer tasks (they never finish)
     let _ = futures::join!(cex_task);

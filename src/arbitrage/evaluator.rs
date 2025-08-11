@@ -1,23 +1,6 @@
-//! Arbitrage detection logic.
-use crate::dex::{PoolState, SwapDirection, calculate_swap_with_library};
-use crate::models::BookDepth;
-
-/// Configuration for arbitrage calculations
-#[derive(Debug, Clone)]
-pub struct ArbitrageConfig {
-    pub min_pnl_usdc: f64,
-    pub dex_fee_bps: f64,
-    pub cex_fee_bps: f64,
-    pub gas_cost_usdc: f64,
-}
-
-/// Result of arbitrage opportunity evaluation
-#[derive(Debug, Clone)]
-pub struct ArbitrageOpportunity {
-    pub direction: String,
-    pub description: String,
-    pub pnl: f64,
-}
+use crate::dex::{PoolState, calculate_swap_with_library};
+use crate::models::{BookDepth, SwapDirection};
+use super::types::{ArbitrageConfig, ArbitrageOpportunity};
 
 /// Evaluate arbitrage opportunities in both directions
 pub fn evaluate_opportunities(
@@ -61,7 +44,7 @@ fn evaluate_direction_a(
         config.dex_fee_bps,
         bid_qty_cex,
     )
-    .unwrap();
+    .ok()?;
 
     let mut token1_in = res.amount_in; // USDC we will spend on DEX
     let mut token0_out = res.amount_out; // ETH we obtain from DEX
@@ -77,7 +60,7 @@ fn evaluate_direction_a(
         return None;
     }
 
-    // Calculate PnL: revenue on CEX minus cost on DEX minus gas.
+    // Calculate profit and loss: revenue on CEX minus cost on DEX minus gas.
     // Do NOT apply DEX fee again (already included in quote). Apply only CEX fee.
     let revenue_total = bid_price * token0_out * (1.0 - config.cex_fee_bps / 10_000.0);
     let cost_total = token1_in; // USDC spent already includes DEX LP fee
@@ -115,7 +98,7 @@ fn evaluate_direction_b(
         config.dex_fee_bps,
         ask_qty_cex,
     )
-    .unwrap();
+    .ok()?;
 
     let mut token0_in = res.amount_in; // ETH to sell on DEX
     let mut token1_out = res.amount_out; // USDC received from DEX
@@ -131,7 +114,7 @@ fn evaluate_direction_b(
         return None;
     }
 
-    // Calculate PnL: revenue on DEX minus cost on CEX minus gas
+    // Calculate profit and loss: revenue on DEX minus cost on CEX minus gas
     let revenue_total = token1_out;
     let cost_total = effective_ask_price * token0_in;
     let pnl = revenue_total - cost_total - config.gas_cost_usdc;
@@ -161,3 +144,5 @@ pub fn calculate_gas_cost_usdc(
 ) -> f64 {
     gas_gwei * 1e-9 * gas_units * gas_multiplier * dex_price
 }
+
+
