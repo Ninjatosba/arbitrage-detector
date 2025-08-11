@@ -1,5 +1,4 @@
 //! Arbitrage detection logic.
-
 use crate::dex::{PoolState, SwapDirection, calculate_swap_with_library};
 use crate::models::BookDepth;
 

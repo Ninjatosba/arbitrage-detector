@@ -1,5 +1,8 @@
 use crate::dex::state::PoolState;
 use alloy_primitives::U256;
+use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
+use std::str::FromStr;
+use tracing::debug;
 use uniswap_v3_math::{
     error::UniswapV3MathError,
     sqrt_price_math::{_get_amount_0_delta, _get_amount_1_delta},
@@ -14,12 +17,18 @@ pub struct SwapResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapDirection {
-    /// token0 (USDC) in  → token1 (WETH) out → price UP  → √P increases
+    /// token0 (USDC) in  → token1 (WETH) out → price UP  → √P decreases
+    /// When CEX price > DEX price, buy ETH on DEX (USDC→ETH) to profit
     Token0ToToken1,
-    /// token1 (WETH) in → token0 (USDC) out → price DOWN → √P decreases
+    /// token1 (WETH) in → token0 (USDC) out → price DOWN → √P increases
+    /// When CEX price < DEX price, sell ETH on DEX (ETH→USDC) to profit
     Token1ToToken0,
 }
-/// Calculate swap using Uniswap V3 math library (more accurate)
+
+/// Calculate swap using Uniswap V3 math library with high precision
+///
+/// This function calculates the optimal swap amounts to reach a target price
+/// using rational math to avoid f64 precision loss in price calculations.
 pub fn calculate_swap_with_library(
     pool: &PoolState,
     target_price: f64,
@@ -31,25 +40,38 @@ pub fn calculate_swap_with_library(
     let sqrt_price_start = U256::from_str_radix(&pool.sqrt_price_x96.to_string(), 10)
         .map_err(|_| UniswapV3MathError::SqrtPriceIsZero)?;
 
-    // Convert target price to sqrtPriceX96
-    let decimals_factor = 10_f64.powi(pool.token1_decimals as i32 - pool.token0_decimals as i32);
-
-    let ratio_target_raw = if target_price > 0.0 {
-        decimals_factor / target_price
-    } else {
-        return Err(UniswapV3MathError::SqrtPriceIsZero);
-    };
-
-    let sqrt_price_target = U256::from((ratio_target_raw.sqrt() * 2.0_f64.powi(96)) as u128);
+    // Calculate target sqrt price using BigDecimal for precision
+    let sqrt_price_target = calculate_sqrt_price_target_with_precision(
+        target_price,
+        pool.token0_decimals,
+        pool.token1_decimals,
+    )?;
 
     // Convert liquidity to u128
     let liquidity = pool.liquidity;
+
+    // Log current and target prices in human-readable format for debugging
+    let current_price = calculate_human_price_from_sqrt_x96(
+        sqrt_price_start,
+        pool.token0_decimals,
+        pool.token1_decimals,
+    );
+    debug!(
+        "Swap calculation: current_price={:.6}, target_price={:.6}, direction={:?}",
+        current_price, target_price, direction
+    );
 
     // Calculate amounts using library functions
     let (amount_in, amount_out) = match direction {
         SwapDirection::Token0ToToken1 => {
             // USDC in, ETH out (price UP). Human price up => sqrt decreases.
+            // CEX price > DEX price: buy ETH on DEX to profit
             if sqrt_price_target >= sqrt_price_start {
+                debug!(
+                    "Skipping trade: sqrt_price_target ({}) >= sqrt_price_start ({}). \
+                     Target price {:.6} would not increase current price {:.6}",
+                    sqrt_price_target, sqrt_price_start, target_price, current_price
+                );
                 return Ok(SwapResult {
                     amount_in: 0.0,
                     amount_out: 0.0,
@@ -71,10 +93,18 @@ pub fn calculate_swap_with_library(
                 false, // round down
             )?;
 
-            // Apply fee
-            let fee_fraction = fee_bps / 10_000.0;
-            let amount0_in_with_fee =
-                (amount0_in.try_into().unwrap_or(0u128) as f64) / (1.0 - fee_fraction);
+            // Apply fee: Uniswap V3 applies fee to input amount
+            // amount_in_with_fee = amount_in / (1 - fee_fraction)
+            let fee_fraction = BigDecimal::from_f64(fee_bps / 10_000.0)
+                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+            let one_minus_fee = BigDecimal::from_f64(1.0).unwrap() - fee_fraction;
+
+            let amount0_in_bd = BigDecimal::from_u128(amount0_in.try_into().unwrap_or(0u128))
+                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+            let amount0_in_with_fee = (amount0_in_bd / one_minus_fee)
+                .to_f64()
+                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+
             (
                 amount0_in_with_fee,
                 amount1_out.try_into().unwrap_or(0u128) as f64,
@@ -82,7 +112,13 @@ pub fn calculate_swap_with_library(
         }
         SwapDirection::Token1ToToken0 => {
             // ETH in, USDC out (price DOWN). Human price down => sqrt increases.
+            // CEX price < DEX price: sell ETH on DEX to profit
             if sqrt_price_target <= sqrt_price_start {
+                debug!(
+                    "Skipping trade: sqrt_price_target ({}) <= sqrt_price_start ({}). \
+                     Target price {:.6} would not decrease current price {:.6}",
+                    sqrt_price_target, sqrt_price_start, target_price, current_price
+                );
                 return Ok(SwapResult {
                     amount_in: 0.0,
                     amount_out: 0.0,
@@ -104,10 +140,17 @@ pub fn calculate_swap_with_library(
                 false, // round down
             )?;
 
-            // Apply fee
-            let fee_fraction = fee_bps / 10_000.0;
-            let amount1_in_with_fee =
-                (amount1_in.try_into().unwrap_or(0u128) as f64) / (1.0 - fee_fraction);
+            // Apply fee: Uniswap V3 applies fee to input amount
+            // amount_in_with_fee = amount_in / (1 - fee_fraction)
+            let fee_fraction = BigDecimal::from_f64(fee_bps / 10_000.0)
+                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+            let one_minus_fee = BigDecimal::from_f64(1.0).unwrap() - fee_fraction;
+
+            let amount1_in_bd = BigDecimal::from_u128(amount1_in.try_into().unwrap_or(0u128))
+                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+            let amount1_in_with_fee = (amount1_in_bd / one_minus_fee)
+                .to_f64()
+                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
 
             (
                 amount1_in_with_fee,
@@ -117,7 +160,6 @@ pub fn calculate_swap_with_library(
     };
 
     // Cap by max_amount if needed
-    let mut capped_by_max = false;
     let mut final_amount_in = amount_in; // RAW units
     let mut final_amount_out = amount_out; // RAW units
 
@@ -139,7 +181,6 @@ pub fn calculate_swap_with_library(
         let scale = max_in_raw / amount_in;
         final_amount_in = max_in_raw;
         final_amount_out = amount_out * scale;
-        capped_by_max = true;
     }
 
     // Convert RAW amounts to human units
@@ -157,7 +198,7 @@ pub fn calculate_swap_with_library(
     };
 
     // Calculate execution price directly from human units
-    let execution_price = match direction {
+    let _execution_price = match direction {
         SwapDirection::Token0ToToken1 => {
             if final_out_human > 0.0 {
                 final_in_human / final_out_human
@@ -179,6 +220,77 @@ pub fn calculate_swap_with_library(
         amount_out: final_out_human,
         hit_boundary: false,
     })
+}
+
+/// Calculate sqrt price target using BigDecimal for high precision
+///
+/// Converts a human-readable target price (USDC per ETH) to sqrtPriceX96
+/// using rational math to avoid f64 precision loss.
+fn calculate_sqrt_price_target_with_precision(
+    target_price: f64,
+    token0_decimals: u8,
+    token1_decimals: u8,
+) -> Result<U256, UniswapV3MathError> {
+    if target_price <= 0.0 {
+        return Err(UniswapV3MathError::SqrtPriceIsZero);
+    }
+
+    // Calculate decimals factor: 10^(token1_decimals - token0_decimals)
+    let decimals_diff = token1_decimals as i32 - token0_decimals as i32;
+    let decimals_factor_f64 = 10.0_f64.powi(decimals_diff);
+    let decimals_factor =
+        BigDecimal::from_f64(decimals_factor_f64).ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+
+    // Calculate ratio: decimals_factor / target_price
+    let target_price_bd =
+        BigDecimal::from_f64(target_price).ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+    let ratio = decimals_factor / target_price_bd;
+
+    // Calculate sqrt of ratio using f64 for better compatibility
+    let ratio_f64 = ratio.to_f64().ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+    let sqrt_ratio_f64 = ratio_f64.sqrt();
+
+    if sqrt_ratio_f64.is_nan() || sqrt_ratio_f64 <= 0.0 {
+        return Err(UniswapV3MathError::SqrtPriceIsZero);
+    }
+
+    // Multiply by 2^96 to get Q96 format
+    let two_pow_96_f64 = 2.0_f64.powi(96);
+    let sqrt_price_q96_f64 = sqrt_ratio_f64 * two_pow_96_f64;
+
+    // Convert to U256 using string conversion for precision
+    let sqrt_price_str = format!("{:.0}", sqrt_price_q96_f64);
+    U256::from_str_radix(&sqrt_price_str, 10).map_err(|_| UniswapV3MathError::SqrtPriceIsZero)
+}
+
+/// Calculate human-readable price from sqrtPriceX96
+///
+/// Converts sqrtPriceX96 back to human-readable price (USDC per ETH)
+/// for debugging and logging purposes.
+fn calculate_human_price_from_sqrt_x96(
+    sqrt_price_x96: U256,
+    token0_decimals: u8,
+    token1_decimals: u8,
+) -> f64 {
+    let sqrt_price_str = sqrt_price_x96.to_string();
+    let sqrt_price_bd =
+        BigDecimal::from_str(&sqrt_price_str).unwrap_or_else(|_| BigDecimal::zero());
+
+    // Divide by 2^96 to get sqrt ratio
+    let two_pow_96_f64 = 2.0_f64.powi(96);
+    let two_pow_96 = BigDecimal::from_f64(two_pow_96_f64).unwrap();
+    let sqrt_ratio = sqrt_price_bd / two_pow_96;
+
+    // Square to get ratio
+    let ratio = &sqrt_ratio * &sqrt_ratio;
+
+    // Calculate price: decimals_factor / ratio
+    let decimals_diff = token1_decimals as i32 - token0_decimals as i32;
+    let decimals_factor_f64 = 10.0_f64.powi(decimals_diff);
+    let decimals_factor = BigDecimal::from_f64(decimals_factor_f64).unwrap();
+    let price_bd = decimals_factor / ratio;
+
+    price_bd.to_f64().unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -216,6 +328,7 @@ mod tests {
             token1_decimals,
             limit_lower_sqrt_price_x96: None,
             limit_upper_sqrt_price_x96: None,
+            price_usdc_per_eth,
         }
     }
 

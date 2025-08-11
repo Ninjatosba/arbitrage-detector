@@ -11,7 +11,6 @@ use tracing;
 
 /// Spawn the main arbitrage evaluation loop
 pub async fn spawn_arbitrage_evaluator(
-    dex_rx: watch::Receiver<f64>,
     cex_rx: watch::Receiver<BookDepth>,
     pool_rx: watch::Receiver<PoolState>,
     gas_rx: watch::Receiver<f64>,
@@ -25,24 +24,25 @@ pub async fn spawn_arbitrage_evaluator(
             ticker.tick().await;
             ticks += 1;
 
-            let dex_price = *dex_rx.borrow();
             let book = cex_rx.borrow().clone();
             let pool_state = pool_rx.borrow().clone();
             let gas_gwei = *gas_rx.borrow();
 
-            if dex_price == 0.0 || book.bids.is_empty() || book.asks.is_empty() {
+            if book.bids.is_empty() || book.asks.is_empty() {
                 if ticks % 5 == 0 {
                     tracing::info!("[HEARTBEAT] waiting for streams (dex or cex not ready)");
                 }
                 continue;
             }
 
+            let dex_price = pool_state.price_usdc_per_eth;
+
             // Calculate gas cost
             let gas_cost_usdc = calculate_gas_cost_usdc(
                 gas_gwei,
                 gas_config.gas_units,
                 gas_config.gas_multiplier,
-                dex_price,
+                pool_state.price_usdc_per_eth,
             );
 
             // Load arbitrage configuration

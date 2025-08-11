@@ -13,22 +13,6 @@ use tokio::sync::watch;
 pub mod calc;
 pub mod state;
 
-/// Spawn a background task that periodically fetches DEX price and sends it via `watch`.
-pub async fn spawn_dex_price_watcher(
-    dex: Dex,
-    dex_tx: watch::Sender<f64>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            ticker.tick().await;
-            if let Ok(price) = dex.fetch_price_usdc_per_eth().await {
-                let _ = dex_tx.send(price);
-            }
-        }
-    })
-}
-
 /// Initialize pool state watcher
 pub async fn init_pool_state_watcher(
     dex: &Dex,
@@ -109,6 +93,8 @@ impl Dex {
                 }
             };
 
+        let price_usdc_per_eth = Self::price_usdc_per_eth(sqrt_price_x96);
+
         Ok(PoolState::new(
             sqrt_price_x96,
             liquidity,
@@ -117,6 +103,7 @@ impl Dex {
             token1_decimals,
             lower_q96,
             upper_q96,
+            price_usdc_per_eth,
         ))
     }
 

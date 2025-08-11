@@ -15,12 +15,12 @@ pub struct GasConfig {
 /// Load gas configuration from environment variables
 pub fn load_gas_config() -> GasConfig {
     let gas_units: f64 = std::env::var("GAS_UNITS")
-        .unwrap_or_else(|_| "350000".into())
+        .unwrap_or_else(|_| "250000".into())
         .parse()
         .unwrap_or(350000.0);
 
     let gas_multiplier: f64 = std::env::var("GAS_MULTIPLIER")
-        .unwrap_or_else(|_| "1.2".into())
+        .unwrap_or_else(|_| "0.0".into())
         .parse()
         .unwrap_or(1.2);
 

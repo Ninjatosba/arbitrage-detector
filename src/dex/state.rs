@@ -17,6 +17,8 @@ pub struct PoolState {
     /// Lower and upper sqrt price limits of the current tick, if known.
     pub limit_lower_sqrt_price_x96: Option<U256>,
     pub limit_upper_sqrt_price_x96: Option<U256>,
+    /// Current price in USDC per ETH
+    pub price_usdc_per_eth: f64,
 }
 
 impl PoolState {
@@ -28,6 +30,7 @@ impl PoolState {
         token1_decimals: u8,
         limit_lower_sqrt_price_x96: Option<U256>,
         limit_upper_sqrt_price_x96: Option<U256>,
+        price_usdc_per_eth: f64,
     ) -> Self {
         Self {
             sqrt_price_x96,
@@ -37,6 +40,7 @@ impl PoolState {
             token1_decimals,
             limit_lower_sqrt_price_x96,
             limit_upper_sqrt_price_x96,
+            price_usdc_per_eth,
         }
     }
 }
