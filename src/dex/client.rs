@@ -1,6 +1,6 @@
-use crate::dex::state::approx_sqrt_price_x96_at_tick;
 use crate::dex::state::PoolState;
-use anyhow::Result;
+use crate::dex::state::approx_sqrt_price_x96_at_tick;
+use crate::errors::Result;
 use ethers::{
     contract::abigen,
     providers::{Http, Provider},
@@ -8,6 +8,7 @@ use ethers::{
 };
 use std::sync::Arc;
 use tokio::sync::watch;
+use tracing::warn;
 
 abigen!(
     UniswapV3Pool,
@@ -93,7 +94,7 @@ impl Dex {
 pub async fn init_pool_state_watcher(
     dex: &Dex,
     _pool_tx: watch::Sender<PoolState>,
-) -> anyhow::Result<watch::Receiver<PoolState>> {
+) -> Result<watch::Receiver<PoolState>> {
     // Get initial pool state
     let initial_state = dex.get_pool_state(18, 6, None, None).await?;
     let (tx, rx) = watch::channel(initial_state);
@@ -104,8 +105,13 @@ pub async fn init_pool_state_watcher(
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             ticker.tick().await;
-            if let Ok(state) = dex_clone.get_pool_state(6, 18, None, None).await {
-                let _ = tx.send(state);
+            match dex_clone.get_pool_state(6, 18, None, None).await {
+                Ok(state) => {
+                    let _ = tx.send(state);
+                }
+                Err(e) => {
+                    warn!(error = %e, "[DEX] failed to refresh pool state");
+                }
             }
         }
     });
@@ -127,5 +133,3 @@ fn price_usdc_per_eth(sqrt_price_x96: U256) -> f64 {
     // Convert raw ratio to human price (USDC per 1 ETH)
     (1.0 / ratio_raw) * 10_f64.powi(18 - 6)
 }
-
-

@@ -1,9 +1,10 @@
+use crate::errors::Result;
 use crate::models::BookDepth;
-use anyhow::{Context, Result};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
+use tracing::warn;
 use url::Url;
 
 const BINANCE_WS_ENDPOINT: &str = "wss://stream.binance.com:9443/ws";
@@ -21,15 +22,25 @@ pub async fn connect_and_stream(symbol: &str) -> Result<impl Stream<Item = BookD
     let stream_path = format!("{}@depth20@100ms", symbol.to_lowercase());
     let url = Url::parse(&format!("{}/{}", BINANCE_WS_ENDPOINT, stream_path))?;
 
-    let (ws_stream, _resp) = connect_async(url)
-        .await
-        .context("WebSocket connect failed")?;
+    let (ws_stream, _resp) = connect_async(url).await?;
 
     let mapped = ws_stream.filter_map(|msg_res| async {
         match msg_res {
             Ok(msg) if msg.is_text() => {
-                let txt = msg.into_text().ok()?;
-                let parsed: DepthMsg = serde_json::from_str(&txt).ok()?;
+                let txt = match msg.into_text() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(error = %e, "[CEX] text extraction failed");
+                        return None;
+                    }
+                };
+                let parsed: DepthMsg = match serde_json::from_str(&txt) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(error = %e, "[CEX] depth JSON parse failed");
+                        return None;
+                    }
+                };
                 let bids: Vec<(f64, f64)> = parsed
                     .bids
                     .iter()
@@ -49,6 +60,10 @@ pub async fn connect_and_stream(symbol: &str) -> Result<impl Stream<Item = BookD
                     asks,
                 })
             }
+            Err(e) => {
+                warn!(error = %e, "[CEX] websocket message error");
+                None
+            }
             _ => None,
         }
     });
@@ -59,7 +74,7 @@ pub async fn connect_and_stream(symbol: &str) -> Result<impl Stream<Item = BookD
 pub async fn spawn_cex_stream_watcher(
     symbol: &str,
     cex_tx: watch::Sender<BookDepth>,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+) -> Result<tokio::task::JoinHandle<()>> {
     let symbol = symbol.to_string();
 
     let handle = tokio::spawn(async move {

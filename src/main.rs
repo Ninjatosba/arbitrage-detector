@@ -2,7 +2,7 @@ use anyhow::Result;
 use arbitrage_detector::{
     aggregator::spawn_arbitrage_evaluator,
     cex::spawn_cex_stream_watcher,
-    config::{AppConfig, load_gas_config},
+    config::AppConfig,
     dex::{Dex, init_pool_state_watcher},
     utils::{init_logging, spawn_gas_price_watcher},
 };
@@ -16,10 +16,11 @@ async fn main() -> Result<()> {
     init_logging();
 
     // Configuration
-    let config = AppConfig::load();
-    let gas_config = load_gas_config();
+    let config = AppConfig::try_load()?;
+    let gas_config = config.gas_config;
+    let arbitrage_config = config.arbitrage_config;
 
-    tracing::info!(?config, "[INIT] arbitrage-detector starting");
+    tracing::info!("[INIT] arbitrage-detector starting");
 
     // Shared state channels
     let (cex_tx, cex_rx) = watch::channel::<arbitrage_detector::models::BookDepth>(
@@ -44,14 +45,8 @@ async fn main() -> Result<()> {
     let cex_task = spawn_cex_stream_watcher("ethusdt", cex_tx).await?;
 
     // Spawn arbitrage evaluator
-    let _evaluator_task = spawn_arbitrage_evaluator(
-        cex_rx,
-        pool_rx,
-        gas_rx,
-        gas_config,
-        config.min_pnl_usdc,
-    )
-    .await;
+    let _evaluator_task =
+        spawn_arbitrage_evaluator(cex_rx, pool_rx, gas_rx, gas_config, arbitrage_config).await;
 
     // Wait indefinitely for producer tasks (they never finish)
     let _ = futures::join!(cex_task);

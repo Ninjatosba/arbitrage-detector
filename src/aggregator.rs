@@ -2,9 +2,9 @@
 
 use crate::{
     arbitrage::{ArbitrageConfig, calculate_gas_cost_usdc, evaluate_opportunities},
+    config::GasConfig,
     dex::PoolState,
     models::BookDepth,
-    config::GasConfig,
 };
 use tokio::sync::watch;
 use tracing;
@@ -15,7 +15,7 @@ pub async fn spawn_arbitrage_evaluator(
     pool_rx: watch::Receiver<PoolState>,
     gas_rx: watch::Receiver<f64>,
     gas_config: GasConfig,
-    min_pnl_usdc: f64,
+    arbitrage_config: ArbitrageConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -45,17 +45,14 @@ pub async fn spawn_arbitrage_evaluator(
                 gas_config.gas_multiplier,
                 pool_state.price_usdc_per_eth,
             );
-
-            // Load arbitrage configuration
-            let config = ArbitrageConfig {
-                min_pnl_usdc,
-                dex_fee_bps: 30.0,
-                cex_fee_bps: 10.0,
-                gas_cost_usdc,
-            };
-
             // Evaluate opportunities
-            let opportunities = evaluate_opportunities(&pool_state, &book, dex_price, &config);
+            let opportunities = evaluate_opportunities(
+                &pool_state,
+                &book,
+                dex_price,
+                &arbitrage_config,
+                gas_cost_usdc,
+            );
 
             if !opportunities.is_empty() {
                 let opportunity_logs: Vec<String> = opportunities
@@ -71,9 +68,9 @@ pub async fn spawn_arbitrage_evaluator(
                     bid_price,
                     ask_price,
                     gas_gwei,
-                    config.dex_fee_bps,
-                    config.cex_fee_bps,
-                    config.gas_cost_usdc,
+                    arbitrage_config.dex_fee_bps,
+                    arbitrage_config.cex_fee_bps,
+                    gas_cost_usdc,
                     "[HEARTBEAT] no opps above threshold"
                 );
             }

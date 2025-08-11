@@ -4,5 +4,6 @@ pub mod cex;
 pub mod cli;
 pub mod config;
 pub mod dex;
+pub mod errors;
 pub mod models;
 pub mod utils;
