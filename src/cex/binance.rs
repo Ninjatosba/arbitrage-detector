@@ -88,3 +88,16 @@ pub async fn spawn_cex_stream_watcher(
 
     Ok(handle)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_depth_message_shape() {
+        // Structure sanity test only; parser lives in stream transform.
+        let raw = r#"{"lastUpdateId":1,"bids":[["100.0","1.0"]],"asks":[["101.0","2.0"]]}"#;
+        let parsed: Result<DepthMsg> = serde_json::from_str::<DepthMsg>(raw).map_err(Into::into);
+        assert!(parsed.is_ok());
+    }
+}

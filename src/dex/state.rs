@@ -1,4 +1,4 @@
-use ethers::types::U256;
+use alloy_primitives::U256;
 
 /// Minimal immutable snapshot of a Uniswap V3 pool state needed for pricing
 /// and swap sizing within a single tick.
@@ -59,5 +59,5 @@ pub fn approx_sqrt_price_x96_at_tick(tick: i32) -> U256 {
     } else {
         "0".to_string()
     };
-    U256::from_dec_str(&s).unwrap_or_else(|_| U256::zero())
+    U256::from_str_radix(&s, 10).unwrap_or_else(|_| U256::ZERO)
 }

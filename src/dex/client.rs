@@ -1,14 +1,16 @@
 use crate::dex::state::PoolState;
-use crate::dex::state::approx_sqrt_price_x96_at_tick;
 use crate::errors::Result;
+use alloy_primitives::U256;
 use ethers::{
     contract::abigen,
     providers::{Http, Provider},
-    types::{Address, U256},
+    types::Address,
 };
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::warn;
+
+use super::state::approx_sqrt_price_x96_at_tick;
 
 abigen!(
     UniswapV3Pool,
@@ -47,6 +49,10 @@ impl Dex {
         let liquidity = self.pool.liquidity().call().await?;
         let tick_spacing = self.pool.tick_spacing().call().await?;
 
+        // Convert ethers U256 to alloy U256
+        let sqrt_price_x96_alloy =
+            U256::from_str_radix(&sqrt_price_x96.to_string(), 10).unwrap_or_default();
+
         // Fill lower/upper sqrt bounds if not provided
         let (lower_q96, upper_q96) =
             match (current_tick_lower_sqrt_q96, current_tick_upper_sqrt_q96) {
@@ -63,10 +69,10 @@ impl Dex {
                 }
             };
 
-        let price_usdc_per_eth = price_usdc_per_eth(sqrt_price_x96);
+        let price_usdc_per_eth = price_usdc_per_eth(sqrt_price_x96_alloy);
 
         Ok(PoolState::new(
-            sqrt_price_x96,
+            sqrt_price_x96_alloy,
             liquidity,
             tick as i32,
             token0_decimals,
@@ -86,7 +92,9 @@ impl Dex {
     /// Fetch current ETH price in USDC
     pub async fn fetch_price_usdc_per_eth(&self) -> Result<f64> {
         let sqrt_price_x96 = self.pool.slot_0().call().await?.0;
-        Ok(price_usdc_per_eth(sqrt_price_x96))
+        let sqrt_price_x96_alloy =
+            U256::from_str_radix(&sqrt_price_x96.to_string(), 10).unwrap_or_default();
+        Ok(price_usdc_per_eth(sqrt_price_x96_alloy))
     }
 }
 

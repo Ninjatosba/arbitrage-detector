@@ -3,14 +3,12 @@ use crate::models::{SwapDirection, SwapResult};
 use alloy_primitives::U256;
 use bigdecimal::{BigDecimal, FromPrimitive, ToPrimitive, Zero};
 use std::str::FromStr;
-use tracing::debug;
 use uniswap_v3_math::{
     error::UniswapV3MathError,
     sqrt_price_math::{_get_amount_0_delta, _get_amount_1_delta},
 };
 
 /// Calculate swap using Uniswap V3 math library with high precision
-///
 /// This function calculates the optimal swap amounts to reach a target price
 /// using rational math to avoid f64 precision loss in price calculations.
 pub fn calculate_swap_with_library(
@@ -24,38 +22,23 @@ pub fn calculate_swap_with_library(
     let sqrt_price_start = U256::from_str_radix(&pool.sqrt_price_x96.to_string(), 10)
         .map_err(|_| UniswapV3MathError::SqrtPriceIsZero)?;
 
-    // Calculate target sqrt price using BigDecimal for precision
-    let sqrt_price_target = calculate_sqrt_price_target_with_precision(
-        target_price,
-        pool.token0_decimals,
-        pool.token1_decimals,
-    )?;
-
     // Convert liquidity to u128
     let liquidity = pool.liquidity;
-
-    // Log current and target prices in human-readable format for debugging
-    let current_price = calculate_human_price_from_sqrt_x96(
-        sqrt_price_start,
-        pool.token0_decimals,
-        pool.token1_decimals,
-    );
-    debug!(
-        "Swap calculation: current_price={:.6}, target_price={:.6}, direction={:?}",
-        current_price, target_price, direction
-    );
 
     // Calculate amounts using library functions
     let (amount_in, amount_out) = match direction {
         SwapDirection::Token0ToToken1 => {
-            // USDC in, ETH out (price UP). Human price up => sqrt decreases.
+            // USDC in, ETH out (price UP). Human price up
             // CEX price > DEX price: buy ETH on DEX to profit
+
+            // Calculate target sqrt price using BigDecimal for precision
+            let real_target_price = target_price * (1.0 - fee_bps / 10_000.0);
+            let sqrt_price_target = calculate_sqrt_price_with_precision_per_eth(
+                real_target_price,
+                pool.token0_decimals,
+                pool.token1_decimals,
+            )?;
             if sqrt_price_target >= sqrt_price_start {
-                debug!(
-                    "Skipping trade: sqrt_price_target ({}) >= sqrt_price_start ({}). \
-                     Target price {:.6} would not increase current price {:.6}",
-                    sqrt_price_target, sqrt_price_start, target_price, current_price
-                );
                 return Ok(SwapResult {
                     amount_in: 0.0,
                     amount_out: 0.0,
@@ -97,12 +80,15 @@ pub fn calculate_swap_with_library(
         SwapDirection::Token1ToToken0 => {
             // ETH in, USDC out (price DOWN). Human price down => sqrt increases.
             // CEX price < DEX price: sell ETH on DEX to profit
+            let fee_bps_adjusted = fee_bps / 10_000.0;
+            // We are selling ETH, so we need to increase the price by the fee to adjust our target
+            let real_target_price = target_price / (1.0 - fee_bps_adjusted);
+            let sqrt_price_target = calculate_sqrt_price_with_precision_per_eth(
+                real_target_price,
+                pool.token0_decimals,
+                pool.token1_decimals,
+            )?;
             if sqrt_price_target <= sqrt_price_start {
-                debug!(
-                    "Skipping trade: sqrt_price_target ({}) <= sqrt_price_start ({}). \
-                     Target price {:.6} would not decrease current price {:.6}",
-                    sqrt_price_target, sqrt_price_start, target_price, current_price
-                );
                 return Ok(SwapResult {
                     amount_in: 0.0,
                     amount_out: 0.0,
@@ -124,15 +110,15 @@ pub fn calculate_swap_with_library(
                 false, // round down
             )?;
 
-            // Apply fee: Uniswap V3 applies fee to input amount
-            // amount_in_with_fee = amount_in / (1 - fee_fraction)
-            let fee_fraction = BigDecimal::from_f64(fee_bps / 10_000.0)
-                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
-            let one_minus_fee = BigDecimal::from_f64(1.0).unwrap() - fee_fraction;
-
+            // include fee to amount1_in
+            // amount_1_in = x * (1 - fee_bps_adjusted)
+            // x = amount_1_in / (1 - fee_bps_adjusted)
             let amount1_in_bd = BigDecimal::from_u128(amount1_in.try_into().unwrap_or(0u128))
                 .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
-            let amount1_in_with_fee = (amount1_in_bd / one_minus_fee)
+            let fee_fraction_bd = BigDecimal::from_f64(fee_bps_adjusted)
+                .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+            let one_minus_fee_adjusted = BigDecimal::from_f64(1.0).unwrap() - fee_fraction_bd;
+            let amount1_in_with_fee = (amount1_in_bd / one_minus_fee_adjusted)
                 .to_f64()
                 .ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
 
@@ -206,16 +192,15 @@ pub fn calculate_swap_with_library(
     })
 }
 
-/// Calculate sqrt price target using BigDecimal for high precision
+/// Calculate sqrt price using BigDecimal for high precision
 ///
-/// Converts a human-readable target price (USDC per ETH) to sqrtPriceX96
-/// using rational math to avoid f64 precision loss.
-fn calculate_sqrt_price_target_with_precision(
-    target_price: f64,
+/// Converts a human-readable price to sqrtPriceX96
+fn calculate_sqrt_price_with_precision_per_eth(
+    price: f64,
     token0_decimals: u8,
     token1_decimals: u8,
 ) -> Result<U256, UniswapV3MathError> {
-    if target_price <= 0.0 {
+    if price <= 0.0 {
         return Err(UniswapV3MathError::SqrtPriceIsZero);
     }
 
@@ -226,9 +211,8 @@ fn calculate_sqrt_price_target_with_precision(
         BigDecimal::from_f64(decimals_factor_f64).ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
 
     // Calculate ratio: decimals_factor / target_price
-    let target_price_bd =
-        BigDecimal::from_f64(target_price).ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
-    let ratio = decimals_factor / target_price_bd;
+    let price_bd = BigDecimal::from_f64(price).ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
+    let ratio = decimals_factor / price_bd;
 
     // Calculate sqrt of ratio using f64 for better compatibility
     let ratio_f64 = ratio.to_f64().ok_or(UniswapV3MathError::SqrtPriceIsZero)?;
@@ -281,31 +265,18 @@ fn calculate_human_price_from_sqrt_x96(
 mod tests {
     use super::*;
     use crate::dex::state::PoolState;
-    use ethers::types::U256 as EthersU256;
-
-    fn sqrt_price_x96_from_price_usdc_per_eth(
-        price_usdc_per_eth: f64,
-        token0_decimals: u8,
-        token1_decimals: u8,
-    ) -> EthersU256 {
-        // ratio_raw = token1/token0 in nominal units = 10^(dec1-dec0) / price
-        let dec_factor = 10f64.powi(token1_decimals as i32 - token0_decimals as i32);
-        let ratio_raw = dec_factor / price_usdc_per_eth;
-        let sqrt_ratio = ratio_raw.sqrt();
-        let q96 = (sqrt_ratio * 2f64.powi(96)) as u128;
-        EthersU256::from(q96)
-    }
 
     fn make_pool(price_usdc_per_eth: f64, liquidity: u128) -> PoolState {
         let token0_decimals = 6; // USDC
         let token1_decimals = 18; // WETH
-        let sqrt_q96 = sqrt_price_x96_from_price_usdc_per_eth(
+        let sqrt_price_x96 = calculate_sqrt_price_with_precision_per_eth(
             price_usdc_per_eth,
             token0_decimals,
             token1_decimals,
-        );
+        )
+        .unwrap();
         PoolState {
-            sqrt_price_x96: sqrt_q96,
+            sqrt_price_x96,
             liquidity,
             tick: 0,
             token0_decimals,
@@ -317,7 +288,23 @@ mod tests {
     }
 
     #[test]
-    fn direction_a_profitable_when_dex_below_cex() {
+    fn test_calculate_sqrt_price_with_precision() {
+        let price = 9.0;
+        let sqrt_price = calculate_sqrt_price_with_precision_per_eth(price, 6, 18).unwrap();
+        let price_usdc_per_eth = calculate_human_price_from_sqrt_x96(sqrt_price, 6, 18);
+        // Use approximate equality due to floating-point precision
+        let tolerance = 1e-10;
+        assert!(
+            (price_usdc_per_eth - price).abs() < tolerance,
+            "Expected price {} to be within {} of {}",
+            price_usdc_per_eth,
+            tolerance,
+            price
+        );
+    }
+
+    #[test]
+    fn direction_a_profitable_when_dex_below_cex_no_fee() {
         let pool = make_pool(4223.0, 1_800_000_000_000_000_000); // ~1.8e18
         let bid_price = 4225.0; // CEX bid above DEX
         let res = calculate_swap_with_library(
@@ -333,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn direction_b_profitable_when_dex_above_cex() {
+    fn direction_b_profitable_when_dex_above_cex_no_fee() {
         let pool = make_pool(4225.0, 1_800_000_000_000_000_000);
         let ask_price = 4223.0; // CEX ask below DEX
         let res =
@@ -341,5 +328,44 @@ mod tests {
                 .unwrap();
         assert!(res.amount_in > 0.0);
         assert!(res.amount_out > 0.0);
+    }
+
+    #[test]
+    fn direction_a_profitable_when_dex_below_cex_with_fee() {
+        let pool = make_pool(4000.0, 1_800_000_000_000_000_000);
+        let bid_price = 4250.0; // CEX bid above DEX
+        // price diff is 250/4250 = 5.88%
+        let res = calculate_swap_with_library(
+            &pool,
+            bid_price,
+            SwapDirection::Token0ToToken1,
+            588.0,
+            10_000.0,
+        )
+        .unwrap();
+        assert!(res.amount_in > 0.0);
+        assert!(res.amount_out > 0.0);
+
+        // Check where fee is 6.26%
+        let res = calculate_swap_with_library(
+            &pool,
+            bid_price,
+            SwapDirection::Token0ToToken1,
+            589.0,
+            10_000.0,
+        )
+        .unwrap();
+        assert!(res.amount_in <= 0.0);
+        assert!(res.amount_out <= 0.0);
+    }
+
+    #[test]
+    fn caps_max_input_and_scales_output() {
+        let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
+        let price = 4210.0;
+        let res =
+            calculate_swap_with_library(&pool, price, SwapDirection::Token0ToToken1, 0.0, 0.5)
+                .unwrap();
+        assert!(res.amount_in <= 0.5 + 1e-9);
     }
 }
