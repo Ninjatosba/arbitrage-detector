@@ -195,7 +195,7 @@ pub fn calculate_swap_with_library(
 /// Calculate sqrt price using BigDecimal for high precision
 ///
 /// Converts a human-readable price to sqrtPriceX96
-fn calculate_sqrt_price_with_precision_per_eth(
+pub fn calculate_sqrt_price_with_precision_per_eth(
     price: f64,
     token0_decimals: u8,
     token1_decimals: u8,
@@ -231,36 +231,6 @@ fn calculate_sqrt_price_with_precision_per_eth(
     U256::from_str_radix(&sqrt_price_str, 10).map_err(|_| UniswapV3MathError::SqrtPriceIsZero)
 }
 
-/// Calculate human-readable price from sqrtPriceX96
-///
-/// Converts sqrtPriceX96 back to human-readable price (USDC per ETH)
-/// for debugging and logging purposes.
-fn calculate_human_price_from_sqrt_x96(
-    sqrt_price_x96: U256,
-    token0_decimals: u8,
-    token1_decimals: u8,
-) -> f64 {
-    let sqrt_price_str = sqrt_price_x96.to_string();
-    let sqrt_price_bd =
-        BigDecimal::from_str(&sqrt_price_str).unwrap_or_else(|_| BigDecimal::zero());
-
-    // Divide by 2^96 to get sqrt ratio
-    let two_pow_96_f64 = 2.0_f64.powi(96);
-    let two_pow_96 = BigDecimal::from_f64(two_pow_96_f64).unwrap();
-    let sqrt_ratio = sqrt_price_bd / two_pow_96;
-
-    // Square to get ratio
-    let ratio = &sqrt_ratio * &sqrt_ratio;
-
-    // Calculate price: decimals_factor / ratio
-    let decimals_diff = token1_decimals as i32 - token0_decimals as i32;
-    let decimals_factor_f64 = 10.0_f64.powi(decimals_diff);
-    let decimals_factor = BigDecimal::from_f64(decimals_factor_f64).unwrap();
-    let price_bd = decimals_factor / ratio;
-
-    price_bd.to_f64().unwrap_or(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +255,35 @@ mod tests {
             limit_upper_sqrt_price_x96: None,
             price_usdc_per_eth,
         }
+    }
+    /// Calculate human-readable price from sqrtPriceX96
+    ///
+    /// Converts sqrtPriceX96 back to human-readable price (USDC per ETH)
+    /// for debugging and logging purposes.
+    fn calculate_human_price_from_sqrt_x96(
+        sqrt_price_x96: U256,
+        token0_decimals: u8,
+        token1_decimals: u8,
+    ) -> f64 {
+        let sqrt_price_str = sqrt_price_x96.to_string();
+        let sqrt_price_bd =
+            BigDecimal::from_str(&sqrt_price_str).unwrap_or_else(|_| BigDecimal::zero());
+
+        // Divide by 2^96 to get sqrt ratio
+        let two_pow_96_f64 = 2.0_f64.powi(96);
+        let two_pow_96 = BigDecimal::from_f64(two_pow_96_f64).unwrap();
+        let sqrt_ratio = sqrt_price_bd / two_pow_96;
+
+        // Square to get ratio
+        let ratio = &sqrt_ratio * &sqrt_ratio;
+
+        // Calculate price: decimals_factor / ratio
+        let decimals_diff = token1_decimals as i32 - token0_decimals as i32;
+        let decimals_factor_f64 = 10.0_f64.powi(decimals_diff);
+        let decimals_factor = BigDecimal::from_f64(decimals_factor_f64).unwrap();
+        let price_bd = decimals_factor / ratio;
+
+        price_bd.to_f64().unwrap_or(0.0)
     }
 
     #[test]

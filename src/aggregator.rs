@@ -46,13 +46,8 @@ pub async fn spawn_arbitrage_evaluator(
                 pool_state.price_usdc_per_eth,
             );
             // Evaluate opportunities
-            let opportunities = evaluate_opportunities(
-                &pool_state,
-                &book,
-                dex_price,
-                &arbitrage_config,
-                gas_cost_usdc,
-            );
+            let opportunities =
+                evaluate_opportunities(&pool_state, &book, &arbitrage_config, gas_cost_usdc);
 
             if !opportunities.is_empty() {
                 let opportunity_logs: Vec<String> = opportunities

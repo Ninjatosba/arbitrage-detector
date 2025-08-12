@@ -6,7 +6,6 @@ use crate::models::{BookDepth, SwapDirection};
 pub fn evaluate_opportunities(
     pool_state: &PoolState,
     book: &BookDepth,
-    dex_price: f64,
     config: &ArbitrageConfig,
     gas_cost_usdc: f64,
 ) -> Vec<ArbitrageOpportunity> {
@@ -22,7 +21,7 @@ pub fn evaluate_opportunities(
     }
 
     // Direction B: buy on CEX -> sell on DEX (use CEX ask)
-    if let Some(opp) = evaluate_direction_b(pool_state, book, dex_price, config, gas_cost_usdc) {
+    if let Some(opp) = evaluate_direction_b(pool_state, book, config, gas_cost_usdc) {
         opportunities.push(opp);
     }
 
@@ -52,6 +51,10 @@ fn evaluate_direction_a(
     let token1_in = res.amount_in; // USDC we will spend on DEX
     let token0_out = res.amount_out; // ETH we obtain from DEX
 
+    if token0_out <= 0.0 {
+        return None;
+    }
+
     // Calculate profit and loss: revenue on CEX minus cost on DEX minus gas.
     let revenue_total = bid_price * token0_out;
     let cost_total = token1_in; // USDC spent already includes DEX LP fee
@@ -77,7 +80,6 @@ fn evaluate_direction_a(
 fn evaluate_direction_b(
     pool_state: &PoolState,
     book: &BookDepth,
-    _dex_price: f64,
     config: &ArbitrageConfig,
     gas_cost_usdc: f64,
 ) -> Option<ArbitrageOpportunity> {
@@ -97,6 +99,10 @@ fn evaluate_direction_b(
     let token0_in = res.amount_in; // ETH to sell on DEX
     let token1_out = res.amount_out; // USDC received from DEX
     // Library will include dex fees on input so we don't need to adjust
+
+    if token1_out <= 0.0 {
+        return None;
+    }
 
     // Calculate profit and loss: revenue on DEX minus cost on CEX minus gas
     let revenue_total = token1_out;
@@ -124,69 +130,215 @@ pub fn calculate_gas_cost_usdc(
     gas_gwei: f64,
     gas_units: f64,
     gas_multiplier: f64,
-    dex_price: f64,
+    price_usdc_per_eth: f64,
 ) -> f64 {
-    gas_gwei * 1e-9 * gas_units * gas_multiplier * dex_price
+    gas_gwei * 1e-9 * gas_units * gas_multiplier * price_usdc_per_eth
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use ethers::types::U256 as EthersU256;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dex::calc::calculate_sqrt_price_with_precision_per_eth;
 
-//     fn sqrt_price_x96_from_price_usdc_per_eth(
-//         price_usdc_per_eth: f64,
-//         token0_decimals: u8,
-//         token1_decimals: u8,
-//     ) -> EthersU256 {
-//         let dec_factor = 10f64.powi(token1_decimals as i32 - token0_decimals as i32);
-//         let ratio_raw = dec_factor / price_usdc_per_eth;
-//         let sqrt_ratio = ratio_raw.sqrt();
-//         let q96 = (sqrt_ratio * 2f64.powi(96)) as u128;
-//         EthersU256::from(q96)
-//     }
+    fn make_pool(price_usdc_per_eth: f64, liquidity: u128) -> PoolState {
+        let token0_decimals = 6;
+        let token1_decimals = 18;
+        let sqrt_q96 = calculate_sqrt_price_with_precision_per_eth(
+            price_usdc_per_eth,
+            token0_decimals,
+            token1_decimals,
+        )
+        .unwrap();
+        PoolState {
+            sqrt_price_x96: sqrt_q96,
+            liquidity,
+            tick: 0,
+            token0_decimals,
+            token1_decimals,
+            limit_lower_sqrt_price_x96: None,
+            limit_upper_sqrt_price_x96: None,
+            price_usdc_per_eth,
+        }
+    }
 
-//     fn make_pool(price_usdc_per_eth: f64, liquidity: u128) -> PoolState {
-//         let token0_decimals = 6;
-//         let token1_decimals = 18;
-//         let sqrt_q96 = sqrt_price_x96_from_price_usdc_per_eth(
-//             price_usdc_per_eth,
-//             token0_decimals,
-//             token1_decimals,
-//         );
-//         PoolState {
-//             sqrt_price_x96: sqrt_q96,
-//             liquidity,
-//             tick: 0,
-//             token0_decimals,
-//             token1_decimals,
-//             limit_lower_sqrt_price_x96: None,
-//             limit_upper_sqrt_price_x96: None,
-//             price_usdc_per_eth,
-//         }
-//     }
+    #[test]
+    fn gas_cost_basic_calculation() {
+        let cost = calculate_gas_cost_usdc(30.0, 300000.0, 1.2, 4000.0);
+        assert!(cost > 0.0);
+        assert_eq!(cost, 43.2);
+    }
 
-//     #[test]
-//     fn gas_cost_basic_calculation() {
-//         let cost = calculate_gas_cost_usdc(30.0, 300000.0, 1.2, 4000.0);
-//         assert!(cost > 0.0);
-//     }
+    #[test]
+    fn direction_a_smoke_profitability() {
+        let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
+        let book = BookDepth {
+            timestamp: 0,
+            bids: vec![(4225.0, 5.0)],
+            asks: vec![(4230.0, 5.0)],
+        };
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 0.0,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 10.0,
+        };
+        let opps = evaluate_opportunities(&pool, &book, &cfg, 0.0);
+        assert!(!opps.is_empty());
+    }
 
-//     #[test]
-//     #[ignore]
-//     fn direction_a_smoke_profitability() {
-//         let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
-//         let book = BookDepth {
-//             timestamp: 0,
-//             bids: vec![(4225.0, 5.0)],
-//             asks: vec![(4230.0, 5.0)],
-//         };
-//         let cfg = ArbitrageConfig {
-//             min_pnl_usdc: 0.0,
-//             dex_fee_bps: 30.0,
-//             cex_fee_bps: 10.0,
-//         };
-//         let opps = evaluate_opportunities(&pool, &book, pool.price_usdc_per_eth, &cfg, 0.0);
-//         assert!(!opps.is_empty());
-//     }
-// }
+    #[test]
+    fn empty_order_book_returns_no_opportunities() {
+        let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
+        let empty_bids = BookDepth {
+            timestamp: 0,
+            bids: vec![],
+            asks: vec![(4210.0, 1.0)],
+        };
+        let empty_asks = BookDepth {
+            timestamp: 0,
+            bids: vec![(4210.0, 1.0)],
+            asks: vec![],
+        };
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 0.0,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 10.0,
+        };
+
+        let opps_a = evaluate_opportunities(&pool, &empty_bids, &cfg, 0.0);
+        let opps_b = evaluate_opportunities(&pool, &empty_asks, &cfg, 0.0);
+
+        assert!(opps_a.is_empty());
+        assert!(opps_b.is_empty());
+    }
+
+    #[test]
+    fn direction_b_smoke_profitability() {
+        // DEX price higher than CEX ask makes B direction attractive
+        let pool = make_pool(4250.0, 1_800_000_000_000_000_000);
+        let book = BookDepth {
+            timestamp: 0,
+            bids: vec![(4240.0, 5.0)],
+            asks: vec![(4223.0, 5.0)],
+        };
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 0.0,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 10.0,
+        };
+        let opps = evaluate_opportunities(&pool, &book, &cfg, 0.0);
+        assert!(opps.iter().any(|o| o.direction == "B"));
+    }
+
+    #[test]
+    fn min_pnl_threshold_filters_out_opportunities() {
+        let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
+        let book = BookDepth {
+            timestamp: 0,
+            bids: vec![(4225.0, 5.0)],
+            asks: vec![(4230.0, 5.0)],
+        };
+        // Set very high minimum profit to filter out any result
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 1.0,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 10.0,
+        };
+        let opps = evaluate_opportunities(&pool, &book, &cfg, 0.0);
+        assert!(opps.is_empty());
+
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 0.001,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 10.0,
+        };
+        let opps = evaluate_opportunities(&pool, &book, &cfg, 0.0);
+        assert!(!opps.is_empty());
+    }
+
+    #[test]
+    fn gas_cost_can_turn_a_profitable_trade_unprofitable() {
+        let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
+        let book = BookDepth {
+            timestamp: 0,
+            bids: vec![(4225.0, 5.0)],
+            asks: vec![(4230.0, 5.0)],
+        };
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 0.0,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 10.0,
+        };
+
+        // With zero gas, expect at least one opportunity
+        let opps_no_gas = evaluate_opportunities(&pool, &book, &cfg, 0.0);
+        assert!(!opps_no_gas.is_empty());
+
+        // With large gas, opportunities should disappear under a modest min_pnl
+        let cfg_with_min = ArbitrageConfig {
+            min_pnl_usdc: 0.0,
+            ..cfg.clone()
+        };
+        let opps_high_gas = evaluate_opportunities(&pool, &book, &cfg_with_min, 0.3);
+        assert!(opps_high_gas.is_empty());
+    }
+
+    #[test]
+    fn description_contains_expected_phrasing_and_values() {
+        let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
+        let book = BookDepth {
+            timestamp: 0,
+            bids: vec![(4225.0, 5.0)],
+            asks: vec![(4300.0, 5.0)], // make B unlikely so we focus on A
+        };
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 0.0,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 10.0,
+        };
+        let opps = evaluate_opportunities(&pool, &book, &cfg, 0.0);
+        if let Some(opp) = opps.iter().find(|o| o.direction == "A") {
+            assert!(opp.description.contains("A:"));
+            assert!(opp.description.contains("Earn $"));
+            assert!(opp.pnl >= 0.0);
+        } else {
+            // If A did not appear, ensure at least B has the expected format
+            let opp_b = opps
+                .iter()
+                .find(|o| o.direction == "B")
+                .expect("expected at least one opportunity");
+            assert!(opp_b.description.contains("B:"));
+            assert!(opp_b.description.contains("Earn $"));
+        }
+    }
+
+    #[test]
+    fn high_cex_fee_can_eliminate_opportunities() {
+        let pool = make_pool(4200.0, 1_800_000_000_000_000_000);
+        // Prices that would normally allow A and B, but crank CEX fee very high
+        let book = BookDepth {
+            timestamp: 0,
+            bids: vec![(4250.0, 5.0)],
+            asks: vec![(4150.0, 5.0)],
+        };
+        let cfg = ArbitrageConfig {
+            min_pnl_usdc: 0.0,
+            dex_fee_bps: 30.0,
+            cex_fee_bps: 1000.0,
+        }; // 10%
+        let opps = evaluate_opportunities(&pool, &book, &cfg, 0.0);
+        // With such a large CEX fee, adjusted prices likely remove profitability
+        assert!(opps.is_empty());
+    }
+
+    #[test]
+    fn gas_cost_formula_matches_expected_math() {
+        let gas_gwei = 35.0;
+        let gas_units = 250_000.0;
+        let multiplier = 1.3;
+        let price = 3800.0;
+        let expected = gas_gwei * 1e-9 * gas_units * multiplier * price;
+        let got = calculate_gas_cost_usdc(gas_gwei, gas_units, multiplier, price);
+        let tol = 1e-12;
+        assert!((got - expected).abs() < tol, "{} vs {}", got, expected);
+    }
+}
