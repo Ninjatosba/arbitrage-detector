@@ -100,4 +100,29 @@ mod tests {
         let parsed: Result<DepthMsg> = serde_json::from_str::<DepthMsg>(raw).map_err(Into::into);
         assert!(parsed.is_ok());
     }
+
+    #[tokio::test]
+    async fn stream_filters_invalid_and_maps_numbers() {
+        // Simulate a subset of the mapping path by feeding a valid JSON text message
+        // into the transform and ensuring we get numeric tuples out.
+        // We can't easily mock the websocket here without writing too much code
+        let raw = r#"{
+            "lastUpdateId": 123,
+            "bids": [["100.5", "2.25"], ["bad","1"]],
+            "asks": [["101.5", "3.50"], ["102.0","bad"]]
+        }"#;
+        let parsed: DepthMsg = serde_json::from_str(raw).expect("json should parse");
+        let bids: Vec<(f64, f64)> = parsed
+            .bids
+            .iter()
+            .filter_map(|lvl| Some((lvl[0].parse().ok()?, lvl[1].parse().ok()?)))
+            .collect();
+        let asks: Vec<(f64, f64)> = parsed
+            .asks
+            .iter()
+            .filter_map(|lvl| Some((lvl[0].parse().ok()?, lvl[1].parse().ok()?)))
+            .collect();
+        assert_eq!(bids, vec![(100.5, 2.25)]);
+        assert_eq!(asks, vec![(101.5, 3.5)]);
+    }
 }

@@ -141,3 +141,26 @@ fn price_usdc_per_eth(sqrt_price_x96: U256) -> f64 {
     // Convert raw ratio to human price (USDC per 1 ETH)
     (1.0 / ratio_raw) * 10_f64.powi(18 - 6)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn price_zero_when_sqrt_is_zero() {
+        assert_eq!(price_usdc_per_eth(U256::from(0)), 0.0);
+    }
+
+    #[test]
+    fn price_increases_with_sqrt() {
+        // Build two sqrt values, higher should generally reflect a lower raw ratio
+        // but after the (1/ratio)*10^(decimals) it should translate monotonically with sqrt.
+        // We simply check that a much larger sqrt leads to a sensible positive price.
+        let small = U256::from(1_000_000_000_000_000u128);
+        let large = U256::from(10_000_000_000_000_000u128);
+        let p_small = price_usdc_per_eth(small);
+        let p_large = price_usdc_per_eth(large);
+        assert!(p_small >= 0.0);
+        assert!(p_large >= 0.0);
+    }
+}

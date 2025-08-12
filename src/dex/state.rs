@@ -61,3 +61,18 @@ pub fn approx_sqrt_price_x96_at_tick(tick: i32) -> U256 {
     };
     U256::from_str_radix(&s, 10).unwrap_or_else(|_| U256::ZERO)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approx_sqrt_monotonic_in_tick() {
+        // Higher tick should yield higher sqrtPriceX96 approximation
+        let low = approx_sqrt_price_x96_at_tick(-1000);
+        let mid = approx_sqrt_price_x96_at_tick(0);
+        let high = approx_sqrt_price_x96_at_tick(1000);
+        assert!(low < mid);
+        assert!(mid < high);
+    }
+}
