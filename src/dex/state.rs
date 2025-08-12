@@ -10,9 +10,9 @@ pub struct PoolState {
     pub liquidity: u128,
     /// Current tick index (Uniswap V3 `slot0.tick`).
     pub tick: i32,
-    /// Token0 decimals (e.g., WETH 18)
+    /// Token0 decimals (e.g., USDC 6)
     pub token0_decimals: u8,
-    /// Token1 decimals (e.g., USDC 6)
+    /// Token1 decimals (e.g., WETH 18)
     pub token1_decimals: u8,
     /// Lower and upper sqrt price limits of the current tick, if known.
     pub limit_lower_sqrt_price_x96: Option<U256>,

@@ -104,7 +104,7 @@ pub async fn init_pool_state_watcher(
     _pool_tx: watch::Sender<PoolState>,
 ) -> Result<watch::Receiver<PoolState>> {
     // Get initial pool state
-    let initial_state = dex.get_pool_state(18, 6, None, None).await?;
+    let initial_state = dex.get_pool_state(6, 18, None, None).await?;
     let (tx, rx) = watch::channel(initial_state);
 
     // Spawn background task to update pool state

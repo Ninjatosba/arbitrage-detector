@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     tracing::info!("[INIT] gas watcher started (10s interval)");
 
     // Spawn producer tasks
-    let cex_task = spawn_cex_stream_watcher("ethusdt", cex_tx).await?;
+    let cex_task = spawn_cex_stream_watcher("ethusdc", cex_tx).await?;
 
     // Spawn arbitrage evaluator
     let _evaluator_task =
