@@ -13,41 +13,45 @@ Detects arbitrage opportunities between a DEX (Uniswap V3) and a CEX (Binance WS
 - Rust (stable)
 - An Ethereum RPC URL (Infura/Alchemy free tier is fine)
 
-### Quick start
-1) Copy environment template and edit values
+### Instructions
+1) Create a `.env` file in the project root:
 
-```bash
-cp .env.example .env
+```env
+RPC_URL="https://eth-mainnet.alchemyapi.io/v2/{YOUR_ALCHEMY_API_KEY}"
+POOL_ADDRESS="0x88E6A0c2dDD26FEEb64F039a2c41296FcB3f5640" # USDC/WETH 0.05% pool
+CEX_WS_URL="wss://stream.binance.com:9443/ws"
+MIN_PNL_USDC="0"
+CEX_FEE_BPS="1.0"
+DEX_FEE_BPS="1.0"
+GAS_UNITS="200000"
+GAS_MULTIPLIER="1"
 ```
 
-2) Build and run
+2) Run with Docker:
+
+```bash
+docker compose up --build
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+3) Run locally (without Docker):
 
 ```bash
 cargo run --release
 ```
 
-3) Run tests
+Tests:
 
 ```bash
 cargo test
 ```
 
-### Environment variables
-See `.env.example` for a ready‑to‑copy template. Key variables:
 
-- `RPC_URL`: HTTPS RPC endpoint (e.g., Alchemy/Infura)
-- `POOL_ADDRESS`: Uniswap V3 pool address for USDC/WETH (mainnet example provided)
-- `CEX_WS_URL`: WebSocket endpoint for Binance public WS (kept for future flexibility)
-- `MIN_PNL_USDC`: Minimum profit in USDC to log an opportunity
-- `CEX_FEE_BPS`: CEX fee in basis points (e.g., `1.0` = 0.01%)
-- `DEX_FEE_BPS`: DEX LP fee in basis points (e.g., `5.0` = 0.05%, `30.0` = 0.3%)
-- `GAS_UNITS`: Estimated gas units for a swap/arbitrage
-- `GAS_MULTIPLIER`: Safety multiplier on gas (e.g., `1.2`)
-
-Notes:
-- The code subscribes to the Binance symbol `ethusdc` by default.
-- Token decimals are assumed as `token0 = USDC (6)` and `token1 = WETH (18)`.
-- The example pool address `0x88E6...` is Uniswap V3 Mainnet USDC/WETH 0.05%.
 
 ### How it works
 1) CEX: Subscribes to Binance depth; extracts best bid/ask.
