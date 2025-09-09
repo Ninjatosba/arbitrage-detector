@@ -1,6 +1,6 @@
-## Arbitrage Detector (Rust / DeFi Take‑Home)
+## Arbitrage Detector (Rust / DeFi)
 
-Detects arbitrage opportunities between a DEX (Uniswap V3) and a CEX (Binance WS). It compares DEX and CEX prices for the ETH/USDC pair, accounting for CEX fee, DEX LP fee, DEX slippage (via Uniswap math), and gas cost.
+Detects arbitrage opportunities between a DEX (Uniswap V3) and a CEX (Binance WS). It compares DEX and CEX prices for the ETH/USDC pair, accounting for CEX fee, DEX LP fee, DEX slippage (via Uniswap math), and gas cost. This project is created for proof of concept not intended for production use.
 
 ### Features
 - DEX pricing via on‑chain `slot0` and Uniswap V3 math (sqrtPriceX96 → price)
